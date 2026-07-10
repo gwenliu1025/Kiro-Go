@@ -118,6 +118,69 @@ func TestResolveProfileArnFetchesAndCachesProfile(t *testing.T) {
 	}
 }
 
+func TestResolveProfileArnProbesFallbackRegionForIDCUsEast(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Init(configPath); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	account := config.Account{
+		ID:          "acct-idc-eu",
+		Email:       "idc@example.com",
+		AccessToken: "access-token",
+		AuthMethod:  "idc",
+		Region:      "us-east-1",
+	}
+	if err := config.AddAccount(account); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+
+	var hosts []string
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/ListAvailableProfiles" {
+				t.Fatalf("expected ListAvailableProfiles path, got %s", req.URL.Path)
+			}
+			hosts = append(hosts, req.URL.Host)
+			switch req.URL.Host {
+			case "codewhisperer.us-east-1.amazonaws.com":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"profiles":[]}`)),
+					Header:     make(http.Header),
+				}, nil
+			case "q.eu-central-1.amazonaws.com":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"profiles":[{"arn":"arn:aws:codewhisperer:eu-central-1:123456789012:profile/test"}]}`)),
+					Header:     make(http.Header),
+				}, nil
+			default:
+				t.Fatalf("unexpected profile host %s", req.URL.Host)
+				return nil, nil
+			}
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	requestAccount := account
+	got, err := ResolveProfileArn(&requestAccount)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "arn:aws:codewhisperer:eu-central-1:123456789012:profile/test"
+	if got != want {
+		t.Fatalf("expected fallback profile ARN %q, got %q", want, got)
+	}
+	assertOrder(t, hosts, []string{"codewhisperer.us-east-1.amazonaws.com", "q.eu-central-1.amazonaws.com"})
+	if requestAccount.ProfileArn != want {
+		t.Fatalf("expected request account profile ARN to be cached, got %q", requestAccount.ProfileArn)
+	}
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 || accounts[0].ProfileArn != want {
+		t.Fatalf("expected persisted profile ARN %q, got %+v", want, accounts)
+	}
+}
+
 func TestResolveProfileArnSuppressesBuilderIDUnsupportedLookup(t *testing.T) {
 	clearProfileArnResolutionCooldowns()
 	t.Cleanup(clearProfileArnResolutionCooldowns)
