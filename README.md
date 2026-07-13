@@ -19,6 +19,13 @@ If this project helps you, a Star would mean a lot.
 - Usage tracking, account import/export, i18n (CN / EN)
 - Support configuring outbound proxy (SOCKS5 / HTTP)
 
+## 本 Fork 差异
+
+- Anthropic `/v1/messages` 默认由 Kiro-Go 原生生成标准高缓存 `usage`，同步响应与流式最终 `message_delta.usage` 使用相同的六类字段。
+- 下游 Sub2API 只需按 Anthropic 标准字段解析和计费，不应再次执行 Equivalent Cache 分配或响应改写。
+- Docker 内网访问地址固定为 `http://kiro-go-pr131:8321`；宿主机诊断地址为 `http://127.0.0.1:8321`。
+- `8321` 只允许绑定宿主机回环地址或 Docker 内网，不得直接暴露到公网。
+
 ## Quick Start
 
 ### Docker Compose (Recommended)
@@ -27,6 +34,7 @@ If this project helps you, a Star would mean a lot.
 git clone https://github.com/Quorinex/Kiro-Go.git
 cd Kiro-Go
 mkdir -p data
+docker network inspect sub2api_sub2api-network >/dev/null 2>&1 || docker network create sub2api_sub2api-network
 docker-compose up -d
 ```
 
@@ -34,8 +42,10 @@ docker-compose up -d
 
 ```bash
 docker run -d \
-  --name kiro-go \
-  -p 8080:8080 \
+  --name kiro-go-pr131 \
+  -p 127.0.0.1:8321:8321 \
+  --network sub2api_sub2api-network \
+  --network-alias kiro-go-pr131 \
   -e ADMIN_PASSWORD=your_secure_password \
   -v /path/to/data:/app/data \
   --restart unless-stopped \
@@ -60,7 +70,7 @@ The repo already includes a `Dockerfile`, so it builds and runs on Zeabur out of
 1. Fork this repo to your GitHub account.
 2. In Zeabur, create a new service and choose **Deploy from GitHub**, then select your fork.
 3. Zeabur auto-detects the `Dockerfile` and builds the image.
-4. In the **Networking** tab, expose port `8080` and bind a domain.
+4. 在 **Networking** 标签配置服务端口 `8321`；生产环境必须通过受控反向代理接入，不得将该端口直接暴露到公网。
 5. In the **Variables** tab, set at least `ADMIN_PASSWORD` (admin panel password).
 6. Mount a Volume at `/app/data` if you want accounts / config to survive redeploys.
 
@@ -80,17 +90,17 @@ Config is auto-created at `data/config.json`. Mount `/app/data` for persistence.
 
 ## Usage
 
-Open `http://localhost:8080/admin`, log in, add accounts, then call the API:
+Open `http://127.0.0.1:8321/admin`, log in, add accounts, then call the API:
 
 ```bash
 # Claude
-curl http://localhost:8080/v1/messages \
+curl http://127.0.0.1:8321/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'
 
 # OpenAI
-curl http://localhost:8080/v1/chat/completions \
+curl http://127.0.0.1:8321/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer any" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello!"}]}'

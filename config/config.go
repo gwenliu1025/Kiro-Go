@@ -155,7 +155,7 @@ type ApiKeyEntry struct {
 type Config struct {
 	// Server settings
 	Password      string        `json:"password"`          // Admin panel password
-	Port          int           `json:"port"`              // HTTP server port (default: 8080)
+	Port          int           `json:"port"`              // HTTP 服务端口（默认 8321）
 	Host          string        `json:"host"`              // HTTP server bind address (default: 0.0.0.0)
 	ApiKey        string        `json:"apiKey,omitempty"`  // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
 	RequireApiKey bool          `json:"requireApiKey"`     // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
@@ -242,6 +242,8 @@ type AccountInfo struct {
 // Version current version
 const Version = "1.1.2"
 
+const defaultServerPort = 8321
+
 var (
 	cfg     *Config
 	cfgLock sync.RWMutex
@@ -266,7 +268,7 @@ func Load() error {
 			// Binds to 0.0.0.0 by default for Docker/container compatibility.
 			cfg = &Config{
 				Password:      "changeme",
-				Port:          8080,
+				Port:          defaultServerPort,
 				Host:          "0.0.0.0",
 				RequireApiKey: false,
 				Accounts:      []Account{},
@@ -391,7 +393,7 @@ func GetPort() int {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	if cfg.Port == 0 {
-		return 8080
+		return defaultServerPort
 	}
 	return cfg.Port
 }

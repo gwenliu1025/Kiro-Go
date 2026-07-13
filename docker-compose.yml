@@ -2,9 +2,10 @@ version: '3.8'
 
 services:
   kiro-go:
+    container_name: kiro-go-pr131
     build: .
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8321:8321"
       # Enterprise SSO (Microsoft 365) callback. The hosted-portal sign-in
       # redirects the browser to localhost:3128. Uncomment this AND set
       # KIRO_SSO_CALLBACK_BIND=0.0.0.0 below to complete that login from a
@@ -21,4 +22,18 @@ services:
       # container network during the ~10-minute login window — only enable on a
       # trusted network.
       # - KIRO_SSO_CALLBACK_BIND=0.0.0.0
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8321/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      sub2api_sub2api-network:
+        aliases:
+          - kiro-go-pr131
     restart: unless-stopped
+
+networks:
+  sub2api_sub2api-network:
+    external: true

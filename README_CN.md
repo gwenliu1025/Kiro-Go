@@ -19,6 +19,13 @@
 - 用量追踪、账号导入导出、中英双语
 - 支持设置出站代理（SOCKS5 / HTTP）
 
+## 本 Fork 差异
+
+- Anthropic `/v1/messages` 默认由 Kiro-Go 原生生成标准高缓存 `usage`，同步响应与流式最终 `message_delta.usage` 使用相同的六类字段。
+- 下游 Sub2API 只需按 Anthropic 标准字段解析和计费，不应再次执行 Equivalent Cache 分配或响应改写。
+- Docker 内网访问地址固定为 `http://kiro-go-pr131:8321`；宿主机诊断地址为 `http://127.0.0.1:8321`。
+- `8321` 只允许绑定宿主机回环地址或 Docker 内网，不得直接暴露到公网。
+
 ## 快速开始
 
 ### Docker Compose（推荐）
@@ -27,6 +34,7 @@
 git clone https://github.com/Quorinex/Kiro-Go.git
 cd Kiro-Go
 mkdir -p data
+docker network inspect sub2api_sub2api-network >/dev/null 2>&1 || docker network create sub2api_sub2api-network
 docker-compose up -d
 ```
 
@@ -34,8 +42,10 @@ docker-compose up -d
 
 ```bash
 docker run -d \
-  --name kiro-go \
-  -p 8080:8080 \
+  --name kiro-go-pr131 \
+  -p 127.0.0.1:8321:8321 \
+  --network sub2api_sub2api-network \
+  --network-alias kiro-go-pr131 \
   -e ADMIN_PASSWORD=your_secure_password \
   -v /path/to/data:/app/data \
   --restart unless-stopped \
@@ -60,7 +70,7 @@ go build -o kiro-go .
 1. Fork 本仓库到你的 GitHub 账号。
 2. 在 Zeabur 新建服务，选择 **Deploy from GitHub**，绑定刚才 fork 的仓库。
 3. Zeabur 自动识别 `Dockerfile` 并完成构建。
-4. 在 **Networking** 标签暴露端口 `8080` 并绑定域名。
+4. 在 **Networking** 标签配置服务端口 `8321`；生产环境必须通过受控反向代理接入，不得将该端口直接暴露到公网。
 5. 在 **Variables** 标签至少设置 `ADMIN_PASSWORD`（管理面板密码）。
 6. 如需持久化账号 / 配置，挂载 Volume 到 `/app/data`。
 
@@ -80,17 +90,17 @@ zeabur deploy
 
 ## 使用方法
 
-访问 `http://localhost:8080/admin` 登录、添加账号，然后调用 API：
+访问 `http://127.0.0.1:8321/admin` 登录、添加账号，然后调用 API：
 
 ```bash
 # Claude
-curl http://localhost:8080/v1/messages \
+curl http://127.0.0.1:8321/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"你好！"}]}'
 
 # OpenAI
-curl http://localhost:8080/v1/chat/completions \
+curl http://127.0.0.1:8321/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer any" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"你好！"}]}'

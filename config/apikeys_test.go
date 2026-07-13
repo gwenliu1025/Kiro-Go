@@ -16,7 +16,7 @@ func TestApiKeyMigrationFromLegacyField(t *testing.T) {
 	// Seed a config file in the legacy shape (no apiKeys list, single ApiKey field).
 	seed := map[string]interface{}{
 		"password":      "p",
-		"port":          8080,
+		"port":          8321,
 		"host":          "0.0.0.0",
 		"apiKey":        "legacy-secret",
 		"requireApiKey": true,
@@ -70,7 +70,7 @@ func TestApiKeyMigrationPublicDeploymentStaysDisabled(t *testing.T) {
 
 	seed := map[string]interface{}{
 		"password":      "p",
-		"port":          8080,
+		"port":          8321,
 		"host":          "0.0.0.0",
 		"apiKey":        "legacy-secret",
 		"requireApiKey": false,

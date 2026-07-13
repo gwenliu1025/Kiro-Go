@@ -7,6 +7,20 @@ import (
 	"testing"
 )
 
+func resetTestConfig(t *testing.T) {
+	t.Helper()
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("初始化测试配置失败：%v", err)
+	}
+}
+
+func TestDefaultPortIs8321(t *testing.T) {
+	resetTestConfig(t)
+	if got := GetPort(); got != 8321 {
+		t.Fatalf("默认端口=%d，期望 8321", got)
+	}
+}
+
 func TestUpdateSettingsPatchPreservesOmittedAPIKeyFields(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
@@ -65,7 +79,7 @@ func TestAccountAllowOverageMigration(t *testing.T) {
 
 	seed := map[string]interface{}{
 		"password":      "p",
-		"port":          8080,
+		"port":          8321,
 		"host":          "0.0.0.0",
 		"requireApiKey": false,
 		"accounts": []map[string]interface{}{

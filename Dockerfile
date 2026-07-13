@@ -20,7 +20,7 @@ COPY --from=builder /app/kiro-go .
 COPY --from=builder /app/web ./web
 RUN mkdir -p /app/data
 
-EXPOSE 8080
+EXPOSE 8321
 VOLUME /app/data
 
 CMD ["./kiro-go"]
