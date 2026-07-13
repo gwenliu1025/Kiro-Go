@@ -135,7 +135,7 @@ BenchmarkClaudeFirstToken2MB-24      	      26	  51964350 ns/op	  40.36 MB/s	  5
 BenchmarkClaudeFirstToken2MB-24      	      16	  63267838 ns/op	  33.15 MB/s	  63083944 first-token-ns/op	96880457 B/op	     926 allocs/op
 ```
 
-## 新单遍请求分析结果
+## 新单遍请求分析初版结果
 
 命令：
 
@@ -172,4 +172,75 @@ BenchmarkNewClaudeAnalysis2MB-24      	     118	   9920244 ns/op	 211.40 MB/s	  
 BenchmarkNewClaudeAnalysis2MB-24      	     122	  10121364 ns/op	 207.20 MB/s	   34704 B/op	     133 allocs/op
 ```
 
-与旧双遍相比，新分析器在四档输入上均减少运行时间；512 KB 和 2 MB 请求的每次分配量稳定在约 34 KB，不再随正文大小线性放大。
+该组数据记录单遍分析器初版表现。后续独立审查补充了复杂 JSON
+兼容性、行为参数指纹和结构化内容场景，下面的复测结果取代“所有请求均约
+34 KB”的宽泛结论。
+
+## 审查修正后的单遍分析复测
+
+直接文本命令：
+
+```powershell
+go test ./proxy -run '^$' -bench '^BenchmarkNewClaudeAnalysis' -benchmem -count=3
+```
+
+结果：
+
+```text
+goos: windows
+goarch: amd64
+pkg: kiro-go/proxy
+cpu: Intel(R) Core(TM) Ultra 9 275HX
+BenchmarkNewClaudeAnalysis1KB-24      	   54165	     23074 ns/op	  44.38 MB/s	    7736 B/op	      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24      	   41324	     25052 ns/op	  40.88 MB/s	    7736 B/op	      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24      	   60855	     17839 ns/op	  57.40 MB/s	    7736 B/op	      64 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24     	    2113	    710009 ns/op	  92.30 MB/s	   40606 B/op	      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24     	    2739	    495697 ns/op	 132.21 MB/s	   40611 B/op	      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24     	    2858	    543754 ns/op	 120.53 MB/s	   40608 B/op	      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24    	     331	   4574177 ns/op	 114.62 MB/s	   40624 B/op	      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24    	     345	   3585110 ns/op	 146.24 MB/s	   40621 B/op	      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24    	     338	   3275828 ns/op	 160.05 MB/s	   40621 B/op	      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24      	      97	  14957022 ns/op	 140.21 MB/s	   40670 B/op	      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24      	      57	  21513189 ns/op	  97.48 MB/s	   40685 B/op	      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24      	      75	  13808457 ns/op	 151.87 MB/s	   40655 B/op	      66 allocs/op
+```
+
+结构化内容命令：
+
+```powershell
+go test ./proxy -run '^$' -bench '^BenchmarkStructuredClaudeAnalysis$' -benchmem -count=3
+```
+
+新路径结果：
+
+```text
+BenchmarkStructuredClaudeAnalysis/New/ContentBlocks-24                   	    1424	   1187104 ns/op	  69.01 MB/s	   44772 B/op	     181 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/ContentBlocks-24                   	    1610	    899484 ns/op	  91.07 MB/s	   44768 B/op	     181 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/ContentBlocks-24                   	    1456	    844965 ns/op	  96.95 MB/s	   44770 B/op	     181 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/Image-24                           	     433	   2654971 ns/op	 197.47 MB/s	   40232 B/op	      53 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/Image-24                           	     532	   2229916 ns/op	 235.12 MB/s	   40201 B/op	      53 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/Image-24                           	     561	   2565760 ns/op	 204.34 MB/s	   40204 B/op	      53 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/ToolResult-24                      	     426	   2539841 ns/op	 103.21 MB/s	   41482 B/op	      81 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/ToolResult-24                      	     460	   3599618 ns/op	  72.83 MB/s	   41468 B/op	      81 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/ToolResult-24                      	     470	   3105761 ns/op	  84.41 MB/s	   41466 B/op	      81 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/TypedContent-24                    	     702	   2133468 ns/op	  61.44 MB/s	   40312 B/op	      55 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/TypedContent-24                    	     819	   1351831 ns/op	  96.96 MB/s	   40305 B/op	      55 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/TypedContent-24                    	     915	   1616361 ns/op	  81.09 MB/s	   40291 B/op	      55 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/ManyMediumTextBlocks-24            	     100	  12291659 ns/op	 106.63 MB/s	  121747 B/op	    2341 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/ManyMediumTextBlocks-24            	      92	  12121165 ns/op	 108.13 MB/s	  121726 B/op	    2341 allocs/op
+BenchmarkStructuredClaudeAnalysis/New/ManyMediumTextBlocks-24            	      97	  10946942 ns/op	 119.73 MB/s	  121721 B/op	    2341 allocs/op
+```
+
+在本次复测范围内：
+
+- 64 KB、512 KB 和 2 MB 的单一直接文本分配稳定在约 `40.6 KB/op`，
+  分配次数为 `66 allocs/op`，低于旧双遍的 `278–330 allocs/op`；
+- 512 KB 图片、256 KB 工具结果及 128 KB 类型化内容分配约为
+  `40.2–41.5 KB/op`，分配次数分别为 `53`、`81` 和 `55 allocs/op`，
+  均低于对应旧双遍；
+- 256 个约 5 KB 的文本块分配约为 `121.7 KB/op`，分配次数为
+  `2,341 allocs/op`，低于旧双遍约 `13,921–13,934 allocs/op`；这表明分配仍会随结构节点和
+  元数据数量增长，不能宣称对所有请求形态恒定；
+- 与对应旧双遍场景相比，新路径显著降低了结构化请求的分配量，且本次所有
+  场景的运行时间均未出现持续性退化；
+- 新单遍分析器的分配次数门槛在上述直接文本与结构化场景中均已满足。
