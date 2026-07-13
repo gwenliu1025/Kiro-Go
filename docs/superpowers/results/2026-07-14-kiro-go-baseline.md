@@ -269,3 +269,113 @@ BenchmarkBuildFeaturesAndAllocateClaudeUsage-24
 
 纯整数求解与“特征构造 + 目标比例 + 整数求解”均显著低于 `200 us`
 门槛；候选数量固定不超过 `64`，不随原始 token 数增长。
+
+## 任务 12：Windows 完整验证
+
+验证代码提交：
+
+```text
+db036d425a7646e9bc5b1e25e1c7ac09686f5c96
+```
+
+验证环境：
+
+```text
+go version go1.26.5 windows/amd64
+GOOS=windows
+GOARCH=amd64
+CGO_ENABLED=0
+```
+
+完整命令及结果：
+
+```powershell
+go test ./...
+go build ./...
+go vet ./...
+go test ./proxy -run '^$' -bench 'Benchmark(NewClaudeAnalysis|AllocateClaudeUsage)' -benchmem -count=10
+```
+
+- `go test ./...`：退出码 `0`；
+- `go build ./...`：退出码 `0`；
+- `go vet ./...`：退出码 `0`，无诊断；
+- benchmark：退出码 `0`，`PASS`，`ok kiro-go/proxy 84.054s`；
+- 验证结束后的 `git status --short` 为空。
+
+10 轮 benchmark 汇总：
+
+| 基准 | 最小值 | 中位数 | 平均值 | 最大值 | 分配 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `BenchmarkNewClaudeAnalysis1KB` | 15,647 ns/op | 17,460 ns/op | 18,078 ns/op | 21,004 ns/op | 7,736 B/op，64 allocs/op |
+| `BenchmarkNewClaudeAnalysis64KB` | 477,190 ns/op | 508,844.5 ns/op | 510,636.8 ns/op | 548,108 ns/op | 约 40,604–40,609 B/op，66 allocs/op |
+| `BenchmarkNewClaudeAnalysis512KB` | 3,325,802 ns/op | 3,993,757 ns/op | 4,033,105.5 ns/op | 5,229,771 ns/op | 约 40,615–40,624 B/op，66 allocs/op |
+| `BenchmarkNewClaudeAnalysis2MB` | 14,176,105 ns/op | 15,272,171 ns/op | 15,214,861.2 ns/op | 16,307,151 ns/op | 约 40,640–40,675 B/op，66 allocs/op |
+| `BenchmarkAllocateClaudeUsage` | 704.1 ns/op | 740.7 ns/op | 746.3 ns/op | 801.5 ns/op | 0 B/op，0 allocs/op |
+
+原始结果：
+
+```text
+BenchmarkNewClaudeAnalysis1KB-24          49641       20254 ns/op    50.56 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          86792       17596 ns/op    58.20 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          81384       18216 ns/op    56.21 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          66278       16502 ns/op    62.05 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          89014       16858 ns/op    60.74 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          77496       16857 ns/op    60.75 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          49287       20522 ns/op    49.90 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          72266       17324 ns/op    59.11 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          79443       15647 ns/op    65.44 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24          72576       21004 ns/op    48.75 MB/s     7736 B/op      64 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2943      508294 ns/op   128.93 MB/s    40604 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2659      498180 ns/op   131.55 MB/s    40606 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2251      487734 ns/op   134.37 MB/s    40606 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2584      548108 ns/op   119.57 MB/s    40605 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2926      519654 ns/op   126.11 MB/s    40605 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2767      509395 ns/op   128.65 MB/s    40609 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2862      501872 ns/op   130.58 MB/s    40607 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2151      539950 ns/op   121.37 MB/s    40604 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2665      515991 ns/op   127.01 MB/s    40605 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24          2607      477190 ns/op   137.34 MB/s    40605 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          356     5229771 ns/op   100.25 MB/s    40621 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          277     4245230 ns/op   123.50 MB/s    40624 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          350     3325802 ns/op   157.64 MB/s    40619 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          274     3683161 ns/op   142.35 MB/s    40622 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          286     3739254 ns/op   140.21 MB/s    40622 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          256     4190225 ns/op   125.12 MB/s    40615 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          312     4044452 ns/op   129.63 MB/s    40617 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          301     4042229 ns/op   129.70 MB/s    40619 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          296     3885646 ns/op   134.93 MB/s    40620 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24          308     3945285 ns/op   132.89 MB/s    40620 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             96    15513549 ns/op   135.18 MB/s    40675 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             76    14768630 ns/op   142.00 MB/s    40654 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             79    14176105 ns/op   147.94 MB/s    40645 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             74    16307151 ns/op   128.60 MB/s    40649 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             74    15226988 ns/op   137.73 MB/s    40651 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             76    14404346 ns/op   145.59 MB/s    40656 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             85    14893254 ns/op   140.81 MB/s    40646 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             76    15317354 ns/op   136.91 MB/s    40656 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             91    15543421 ns/op   134.92 MB/s    40640 B/op      66 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24             76    15997814 ns/op   131.09 MB/s    40653 B/op      66 allocs/op
+BenchmarkAllocateClaudeUsage-24         1557524         714.2 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1619468         742.0 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1622184         730.9 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1722067         704.1 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1683367         739.4 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1430829         801.5 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1661496         775.3 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1544928         778.3 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1777890         729.3 ns/op                   0 B/op       0 allocs/op
+BenchmarkAllocateClaudeUsage-24         1672473         748.4 ns/op                   0 B/op       0 allocs/op
+```
+
+价格合同扫描：
+
+```powershell
+rg -n '\$[0-9]|MTok|0\.50|6\.25|10\.00|18\.75|30\.00' proxy
+```
+
+唯一命中是 `proxy/translator.go` 中模型版本规范化替换串
+`claude-$1-$2.$3`，其中 `$1`、`$2`、`$3` 是正则捕获组引用，不是美元价格。
+`proxy` 中没有模型美元价格表。
+
+Windows 环境仍不能提供有效 race 证据；`go test -race ./...` 保留到
+Linux 毕业机执行。
