@@ -287,7 +287,9 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	// 构建最终内容
 	finalContent := ""
-	if currentContent != "" {
+	if !keepCurrentToolResults && len(currentToolResults) > 0 {
+		finalContent = joinHistoryText(currentContent, buildToolResultsContinuation(currentToolResults))
+	} else if currentContent != "" {
 		finalContent = currentContent
 	} else if len(currentImages) > 0 {
 		finalContent = normalizeUserContent("", true)
