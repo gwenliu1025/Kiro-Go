@@ -180,16 +180,16 @@ type ClaudeResponse struct {
 }
 
 type ClaudeCacheCreationUsage struct {
-	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
 }
 
 type ClaudeUsage struct {
-	InputTokens              int                       `json:"input_tokens"`
-	OutputTokens             int                       `json:"output_tokens"`
-	CacheCreationInputTokens int                       `json:"cache_creation_input_tokens,omitempty"`
-	CacheReadInputTokens     int                       `json:"cache_read_input_tokens,omitempty"`
-	CacheCreation            *ClaudeCacheCreationUsage `json:"cache_creation,omitempty"`
+	InputTokens              int                      `json:"input_tokens"`
+	OutputTokens             int                      `json:"output_tokens"`
+	CacheCreationInputTokens int                      `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int                      `json:"cache_read_input_tokens"`
+	CacheCreation            ClaudeCacheCreationUsage `json:"cache_creation"`
 }
 
 // ==================== Claude -> Kiro 转换 ====================

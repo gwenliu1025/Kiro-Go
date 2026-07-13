@@ -328,7 +328,7 @@ func testClaudeUsage(inputTokens, outputTokens int) ClaudeUsage {
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: inputTokens * 4,
-		CacheCreation: &ClaudeCacheCreationUsage{
+		CacheCreation: ClaudeCacheCreationUsage{
 			Ephemeral1hInputTokens: inputTokens * 4,
 		},
 	}

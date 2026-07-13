@@ -323,12 +323,7 @@ func promptCacheTaskActive(state *promptCacheTaskState, now time.Time) (bool, fl
 }
 
 func cloneClaudeUsage(usage ClaudeUsage) ClaudeUsage {
-	cloned := usage
-	if usage.CacheCreation != nil {
-		cacheCreation := *usage.CacheCreation
-		cloned.CacheCreation = &cacheCreation
-	}
-	return cloned
+	return usage
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {

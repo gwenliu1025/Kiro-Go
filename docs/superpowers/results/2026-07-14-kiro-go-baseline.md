@@ -244,3 +244,28 @@ BenchmarkStructuredClaudeAnalysis/New/ManyMediumTextBlocks-24            	      
 - 与对应旧双遍场景相比，新路径显著降低了结构化请求的分配量，且本次所有
   场景的运行时间均未出现持续性退化；
 - 新单遍分析器的分配次数门槛在上述直接文本与结构化场景中均已满足。
+
+## 特征模型与整数求解器性能
+
+命令：
+
+```powershell
+go test ./proxy -run '^$' -bench '^(BenchmarkAllocateClaudeUsage|BenchmarkBuildFeaturesAndAllocateClaudeUsage)$' -benchmem -count=10
+```
+
+结果范围：
+
+```text
+BenchmarkAllocateClaudeUsage-24
+  645.4–909.5 ns/op
+  0 B/op
+  0 allocs/op
+
+BenchmarkBuildFeaturesAndAllocateClaudeUsage-24
+  792.2–1167 ns/op
+  32 B/op
+  1 allocs/op
+```
+
+纯整数求解与“特征构造 + 目标比例 + 整数求解”均显著低于 `200 us`
+门槛；候选数量固定不超过 `64`，不随原始 token 数增长。

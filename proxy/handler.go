@@ -1543,7 +1543,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
 		resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 		if cacheProfile != nil {
-			resp.Usage.CacheCreation = &ClaudeCacheCreationUsage{
+			resp.Usage.CacheCreation = ClaudeCacheCreationUsage{
 				Ephemeral5mInputTokens: cacheUsage.CacheCreation5mInputTokens,
 				Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,
 			}
