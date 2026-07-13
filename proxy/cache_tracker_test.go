@@ -143,10 +143,79 @@ func TestPromptCacheTrackerFiveMinuteReadRefreshesActivity(t *testing.T) {
 	if firstRead.Phase != promptCachePhaseContinue {
 		t.Fatalf("4 分钟时应命中续轮，得到 %v", firstRead.Phase)
 	}
+	tracker.Commit(promptCacheCommit{
+		TaskKey:            continued.TaskKey,
+		RequestFingerprint: continued.RequestFingerprint,
+		TTL:                firstRead.TTL,
+		Prefixes:           continued.Prefixes,
+		Usage:              testClaudeUsage(110, 10),
+		SuccessfulAt:       now.Add(4 * time.Minute),
+	})
 
 	secondRead := tracker.Snapshot(continued, now.Add(8*time.Minute))
 	if secondRead.Phase != promptCachePhaseContinue {
 		t.Fatalf("5 分钟读取应刷新活动窗口，8 分钟时仍应续轮，得到 %v", secondRead.Phase)
+	}
+}
+
+func TestPromptCacheTrackerFiveMinuteFailedReadDoesNotRefreshActivity(t *testing.T) {
+	analysis := analysisForTTL(t, promptCacheTTL5m)
+	tracker := newPromptCacheTracker(time.Hour)
+	now := time.Unix(1_700_000_000, 0)
+	tracker.Commit(promptCacheCommit{
+		TaskKey:            analysis.TaskKey,
+		RequestFingerprint: analysis.RequestFingerprint,
+		TTL:                promptCacheTTL5m,
+		Prefixes:           analysis.Prefixes,
+		Usage:              testClaudeUsage(100, 10),
+		SuccessfulAt:       now,
+	})
+
+	continued := continuedAnalysis(analysis, "api-key-ttl-5m")
+	beforeFailure := tracker.Snapshot(continued, now.Add(4*time.Minute))
+	if beforeFailure.Phase != promptCachePhaseContinue {
+		t.Fatalf("4 分钟时应命中续轮，得到 %v", beforeFailure.Phase)
+	}
+
+	afterFailure := tracker.Snapshot(continued, now.Add(6*time.Minute))
+	if afterFailure.Phase != promptCachePhaseRebuild {
+		t.Fatalf("失败读取不得刷新活动窗口，得到 %v", afterFailure.Phase)
+	}
+}
+
+func TestPromptCacheTrackerFiveMinuteSuccessfulRetryRefreshesWithoutAdvancingRound(t *testing.T) {
+	analysis := analysisForTTL(t, promptCacheTTL5m)
+	tracker := newPromptCacheTracker(time.Hour)
+	now := time.Unix(1_700_000_000, 0)
+	usage := testClaudeUsage(100, 10)
+	tracker.Commit(promptCacheCommit{
+		TaskKey:            analysis.TaskKey,
+		RequestFingerprint: analysis.RequestFingerprint,
+		TTL:                promptCacheTTL5m,
+		Prefixes:           analysis.Prefixes,
+		Usage:              usage,
+		SuccessfulAt:       now,
+	})
+
+	retry := tracker.Snapshot(analysis, now.Add(4*time.Minute))
+	if retry.ExistingUsage == nil {
+		t.Fatalf("4 分钟时应命中幂等 usage")
+	}
+	tracker.Commit(promptCacheCommit{
+		TaskKey:            analysis.TaskKey,
+		RequestFingerprint: analysis.RequestFingerprint,
+		TTL:                promptCacheTTL5m,
+		Prefixes:           analysis.Prefixes,
+		Usage:              usage,
+		SuccessfulAt:       now.Add(4 * time.Minute),
+	})
+
+	afterRetry := tracker.Snapshot(analysis, now.Add(8*time.Minute))
+	if afterRetry.Phase != promptCachePhaseContinue || afterRetry.ExistingUsage == nil {
+		t.Fatalf("成功幂等重试应刷新 5 分钟活动窗口：%+v", afterRetry)
+	}
+	if afterRetry.SuccessfulRounds != 1 {
+		t.Fatalf("成功幂等重试不得推进轮次：得到 %d", afterRetry.SuccessfulRounds)
 	}
 }
 
@@ -291,35 +360,6 @@ func TestPromptCacheTrackerConcurrentSnapshotAndCommit(t *testing.T) {
 
 	if tracker.taskCount() != workers {
 		t.Fatalf("并发提交后任务数量不符：得到 %d，期望 %d", tracker.taskCount(), workers)
-	}
-}
-
-func TestBuildClaudeUsageMapIncludesCacheFields(t *testing.T) {
-	usage := promptCacheUsage{
-		CacheCreationInputTokens:   30,
-		CacheReadInputTokens:       20,
-		CacheCreation5mInputTokens: 10,
-		CacheCreation1hInputTokens: 20,
-	}
-
-	m := buildClaudeUsageMap(100, 50, usage, true)
-
-	if got := m["input_tokens"]; got != 50 {
-		t.Fatalf("期望普通输入 token 为 50，得到 %#v", got)
-	}
-	if got := m["cache_creation_input_tokens"]; got != 30 {
-		t.Fatalf("期望缓存创建 token 为 30，得到 %#v", got)
-	}
-	if got := m["cache_read_input_tokens"]; got != 20 {
-		t.Fatalf("期望缓存读取 token 为 20，得到 %#v", got)
-	}
-	creation, ok := m["cache_creation"].(map[string]int)
-	if !ok {
-		t.Fatalf("期望缓存创建明细，得到 %#v", m["cache_creation"])
-	}
-	if creation["ephemeral_5m_input_tokens"] != 10 ||
-		creation["ephemeral_1h_input_tokens"] != 20 {
-		t.Fatalf("TTL 明细不符：%#v", creation)
 	}
 }
 

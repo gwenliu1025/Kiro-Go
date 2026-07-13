@@ -73,20 +73,6 @@ type promptCacheShard struct {
 	tasks map[[32]byte]*promptCacheTaskState
 }
 
-// Anthropic requires cached prefixes to reach a minimum token count before
-// caching takes effect. Breakpoints below this threshold are excluded from
-// matching and storage to avoid reporting unrealistic 100% cache hits on
-// short requests.
-const defaultMinCacheableTokens = 1024
-const opusMinCacheableTokens = 4096
-
-type promptCacheUsage struct {
-	CacheCreationInputTokens   int
-	CacheReadInputTokens       int
-	CacheCreation5mInputTokens int
-	CacheCreation1hInputTokens int
-}
-
 type promptCacheBreakpoint struct {
 	Fingerprint      [32]byte
 	CumulativeTokens int
@@ -99,36 +85,12 @@ type promptCacheProfile struct {
 	Model            string
 }
 
-func minCacheableTokensForModel(model string) int {
-	lower := strings.ToLower(model)
-	if strings.Contains(lower, "opus") {
-		return opusMinCacheableTokens
-	}
-	return defaultMinCacheableTokens
-}
-
-type promptCacheEntry struct {
-	ExpiresAt time.Time
-	TTL       time.Duration
-}
-
 type promptCacheTracker struct {
 	shards [promptCacheShardCount]promptCacheShard
-
-	// 以下字段只为尚未切换的新旧 handler 过渡期保留，任务 6 删除。
-	mu               sync.Mutex
-	entriesByAccount map[string]map[[32]byte]promptCacheEntry
-	maxSupportedTTL  time.Duration
 }
 
-func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
-	if maxTTL <= 0 {
-		maxTTL = defaultPromptCacheTTL
-	}
-	tracker := &promptCacheTracker{
-		entriesByAccount: make(map[string]map[[32]byte]promptCacheEntry),
-		maxSupportedTTL:  maxTTL,
-	}
+func newPromptCacheTracker(_ time.Duration) *promptCacheTracker {
+	tracker := &promptCacheTracker{}
 	for i := range tracker.shards {
 		tracker.shards[i].tasks = make(map[[32]byte]*promptCacheTaskState)
 	}
@@ -181,10 +143,6 @@ func (t *promptCacheTracker) Snapshot(analysis claudeRequestAnalysis, now time.T
 		usage := cloneClaudeUsage(record.Usage)
 		snapshot.ExistingUsage = &usage
 		snapshot.Phase = promptCachePhaseContinue
-		if state.TTL == promptCacheTTL5m {
-			state.LastActivityAt = now
-			snapshot.AgeRatio = 0
-		}
 		return snapshot
 	}
 
@@ -201,10 +159,6 @@ func (t *promptCacheTracker) Snapshot(analysis claudeRequestAnalysis, now time.T
 
 	if snapshot.MatchedPrefixTokens > 0 {
 		snapshot.Phase = promptCachePhaseContinue
-		if state.TTL == promptCacheTTL5m {
-			state.LastActivityAt = now
-			snapshot.AgeRatio = 0
-		}
 	}
 	return snapshot
 }
@@ -237,7 +191,18 @@ func (t *promptCacheTracker) Commit(commit promptCacheCommit) {
 		shard.tasks[commit.TaskKey] = state
 	}
 
-	if _, exists := state.Usages[commit.RequestFingerprint]; exists {
+	if record, exists := state.Usages[commit.RequestFingerprint]; exists {
+		if commit.SuccessfulAt.After(state.LastSuccessfulAt) {
+			state.LastSuccessfulAt = commit.SuccessfulAt
+		}
+		if state.TTL == promptCacheTTL5m &&
+			commit.SuccessfulAt.After(state.LastActivityAt) {
+			state.LastActivityAt = commit.SuccessfulAt
+		}
+		if commit.SuccessfulAt.After(record.SuccessfulAt) {
+			record.SuccessfulAt = commit.SuccessfulAt
+			state.Usages[commit.RequestFingerprint] = record
+		}
 		return
 	}
 
@@ -380,116 +345,6 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 		Breakpoints:      breakpoints,
 		TotalInputTokens: totalInputTokens,
 		Model:            req.Model,
-	}
-}
-
-func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
-	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
-		return promptCacheUsage{}
-	}
-
-	minTokens := minCacheableTokensForModel(profile.Model)
-	last := profile.Breakpoints[len(profile.Breakpoints)-1]
-	lastTokens := minInt(last.CumulativeTokens, profile.TotalInputTokens)
-	now := time.Now()
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.pruneExpiredLocked(now)
-
-	entries := t.entriesByAccount[accountID]
-	if len(entries) == 0 {
-		// First request for this account: report creation only if above threshold.
-		effectiveCreation := lastTokens
-		if effectiveCreation < minTokens {
-			effectiveCreation = 0
-		}
-		cache5m, cache1h := computePromptCacheTTLBreakdown(profile, 0)
-		return promptCacheUsage{
-			CacheCreationInputTokens:   effectiveCreation,
-			CacheReadInputTokens:       0,
-			CacheCreation5mInputTokens: cache5m,
-			CacheCreation1hInputTokens: cache1h,
-		}
-	}
-
-	// Cap cacheable tokens at 85% of total input to ensure a realistic
-	// uncached portion. The newest content in a request is never fully
-	// served from cache on the current turn.
-	maxCacheable := int(float64(profile.TotalInputTokens) * 0.85)
-	if lastTokens > maxCacheable {
-		lastTokens = maxCacheable
-	}
-
-	matchedTokens := 0
-	for i := len(profile.Breakpoints) - 1; i >= 0; i-- {
-		breakpoint := profile.Breakpoints[i]
-		// Skip breakpoints below the minimum cacheable token threshold.
-		if breakpoint.CumulativeTokens < minTokens {
-			continue
-		}
-		entry, ok := entries[breakpoint.Fingerprint]
-		if !ok || entry.ExpiresAt.Before(now) {
-			continue
-		}
-		entry.ExpiresAt = now.Add(entry.TTL)
-		entries[breakpoint.Fingerprint] = entry
-		matchedTokens = minInt(breakpoint.CumulativeTokens, profile.TotalInputTokens)
-		if matchedTokens > lastTokens {
-			matchedTokens = lastTokens
-		}
-		break
-	}
-
-	creation := maxInt(lastTokens-matchedTokens, 0)
-	cache5m, cache1h := computePromptCacheTTLBreakdown(profile, matchedTokens)
-	return promptCacheUsage{
-		CacheCreationInputTokens:   creation,
-		CacheReadInputTokens:       matchedTokens,
-		CacheCreation5mInputTokens: cache5m,
-		CacheCreation1hInputTokens: cache1h,
-	}
-}
-
-func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfile) {
-	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
-		return
-	}
-
-	minTokens := minCacheableTokensForModel(profile.Model)
-	now := time.Now()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.pruneExpiredLocked(now)
-
-	entries := t.entriesByAccount[accountID]
-	if entries == nil {
-		entries = make(map[[32]byte]promptCacheEntry)
-		t.entriesByAccount[accountID] = entries
-	}
-
-	for _, breakpoint := range profile.Breakpoints {
-		// Skip breakpoints below the minimum cacheable token threshold.
-		if breakpoint.CumulativeTokens < minTokens {
-			continue
-		}
-		entries[breakpoint.Fingerprint] = promptCacheEntry{
-			ExpiresAt: now.Add(breakpoint.TTL),
-			TTL:       breakpoint.TTL,
-		}
-	}
-}
-
-func (t *promptCacheTracker) pruneExpiredLocked(now time.Time) {
-	for accountID, entries := range t.entriesByAccount {
-		for fingerprint, entry := range entries {
-			if !entry.ExpiresAt.After(now) {
-				delete(entries, fingerprint)
-			}
-		}
-		if len(entries) == 0 {
-			delete(t.entriesByAccount, accountID)
-		}
 	}
 }
 
@@ -738,51 +593,6 @@ func normalizePromptCacheTTL(ttl time.Duration) time.Duration {
 		return time.Hour
 	}
 	return defaultPromptCacheTTL
-}
-
-func computePromptCacheTTLBreakdown(profile *promptCacheProfile, matchedTokens int) (int, int) {
-	if profile == nil || len(profile.Breakpoints) == 0 {
-		return 0, 0
-	}
-
-	cache5m := 0
-	cache1h := 0
-	previous := matchedTokens
-	for _, breakpoint := range profile.Breakpoints {
-		current := minInt(breakpoint.CumulativeTokens, profile.TotalInputTokens)
-		if current <= previous {
-			continue
-		}
-		delta := current - previous
-		if breakpoint.TTL >= time.Hour {
-			cache1h += delta
-		} else {
-			cache5m += delta
-		}
-		previous = current
-	}
-	return cache5m, cache1h
-}
-
-func billedClaudeInputTokens(inputTokens int, usage promptCacheUsage) int {
-	return maxInt(inputTokens-usage.CacheCreationInputTokens-usage.CacheReadInputTokens, 0)
-}
-
-func buildClaudeUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
-	result := map[string]interface{}{
-		"input_tokens":  billedClaudeInputTokens(inputTokens, usage),
-		"output_tokens": outputTokens,
-	}
-	if !includeCache {
-		return result
-	}
-	result["cache_creation_input_tokens"] = usage.CacheCreationInputTokens
-	result["cache_read_input_tokens"] = usage.CacheReadInputTokens
-	result["cache_creation"] = map[string]int{
-		"ephemeral_5m_input_tokens": usage.CacheCreation5mInputTokens,
-		"ephemeral_1h_input_tokens": usage.CacheCreation1hInputTokens,
-	}
-	return result
 }
 
 func canonicalizeCacheValue(value interface{}) string {

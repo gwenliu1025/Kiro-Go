@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -163,6 +164,9 @@ type KiroPayload struct {
 	// in tool_use responses so the client can match them to its tool registry.
 	// Not serialized to the Kiro API request body.
 	ToolNameMap map[string]string `json:"-"`
+
+	// WasTruncated 表示实际发送给上游的 payload 已不再对应完整 Claude 请求。
+	WasTruncated bool `json:"-"`
 }
 
 type KiroUserInputMessage struct {
@@ -303,11 +307,6 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		return err
 	}
 
-	// Debug: dump full payload for troubleshooting upstream rejections
-	if payloadJSON, err := json.Marshal(payload); err == nil {
-		logger.Debugf("[KiroAPI] Request payload: %s", string(payloadJSON))
-	}
-
 	// Wrap OnToolUse to restore original tool names for the client.
 	if callback != nil && callback.OnToolUse != nil && len(payload.ToolNameMap) > 0 {
 		originalOnToolUse := callback.OnToolUse
@@ -343,7 +342,16 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		// Target the profile's data-plane region; endpoint URLs are declared for us-east-1.
 		epURL := regionalizeURLForProfile(ep.URL, account, payload.ProfileArn)
 
-		reqBody, _ := json.Marshal(payload)
+		reqBody, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		logger.Debugf(
+			"[KiroAPI] request model=%s payload_bytes=%d payload_sha256=%x",
+			payload.ConversationState.CurrentMessage.UserInputMessage.ModelID,
+			len(reqBody),
+			sha256.Sum256(reqBody),
+		)
 		req, err := http.NewRequest("POST", epURL, bytes.NewReader(reqBody))
 		if err != nil {
 			lastErr = err
@@ -408,7 +416,16 @@ func accountEmailForLog(account *config.Account) string {
 	if account == nil {
 		return "<nil>"
 	}
-	return account.Email
+	email := strings.TrimSpace(account.Email)
+	at := strings.LastIndex(email, "@")
+	if at <= 0 || at == len(email)-1 {
+		return "<redacted-email>"
+	}
+	local := []rune(email[:at])
+	if len(local) == 0 {
+		return "<redacted-email>"
+	}
+	return string(local[0]) + "***@" + email[at+1:]
 }
 
 // ==================== Event Stream Parsing ====================

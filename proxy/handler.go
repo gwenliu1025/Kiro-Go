@@ -21,16 +21,16 @@ const tokenRefreshSkewSeconds int64 = 120
 
 // RequestLog stores details about a single API request (success or failure).
 type RequestLog struct {
-	Time      int64  `json:"time"`      // Unix timestamp
-	Endpoint  string `json:"endpoint"`  // claude/openai/responses
-	Model     string `json:"model"`     // Requested model
-	AccountID string `json:"accountId"` // Account used
-	Status    string `json:"status"`    // "success" or "error"
-	Error     string `json:"error"`     // Error message (empty on success)
-	ErrorType string `json:"errorType"` // Error category (empty on success)
-	Tokens    int    `json:"tokens"`    // Total tokens (input+output, 0 on failure)
-	Credits   float64 `json:"credits"`  // Credits consumed (0 on failure)
-	Duration  int64  `json:"duration"`  // Request duration in ms
+	Time      int64   `json:"time"`      // Unix timestamp
+	Endpoint  string  `json:"endpoint"`  // claude/openai/responses
+	Model     string  `json:"model"`     // Requested model
+	AccountID string  `json:"accountId"` // Account used
+	Status    string  `json:"status"`    // "success" or "error"
+	Error     string  `json:"error"`     // Error message (empty on success)
+	ErrorType string  `json:"errorType"` // Error category (empty on success)
+	Tokens    int     `json:"tokens"`    // Total tokens (input+output, 0 on failure)
+	Credits   float64 `json:"credits"`   // Credits consumed (0 on failure)
+	Duration  int64   `json:"duration"`  // Request duration in ms
 }
 
 const requestLogsMaxSize = 500
@@ -799,6 +799,62 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	h.handleClaudeMessagesInternal(w, r)
 }
 
+type preparedClaudeUsage struct {
+	Usage  ClaudeUsage
+	Commit promptCacheCommit
+	OK     bool
+}
+
+func prepareFinalClaudeUsage(
+	rawInputTokens int,
+	rawOutputTokens int,
+	analysis claudeRequestAnalysis,
+	snapshot promptCacheSnapshot,
+	now time.Time,
+) preparedClaudeUsage {
+	rawUsage := ClaudeUsage{
+		InputTokens:  maxInt(rawInputTokens, 0),
+		OutputTokens: maxInt(rawOutputTokens, 0),
+	}
+	if rawInputTokens < 0 || rawOutputTokens < 0 {
+		return preparedClaudeUsage{Usage: rawUsage}
+	}
+	if snapshot.ExistingUsage != nil {
+		usage := cloneClaudeUsage(*snapshot.ExistingUsage)
+		return preparedClaudeUsage{
+			Usage: usage,
+			Commit: promptCacheCommit{
+				TaskKey:            analysis.TaskKey,
+				RequestFingerprint: analysis.RequestFingerprint,
+				TTL:                snapshot.TTL,
+				Usage:              usage,
+				SuccessfulAt:       now,
+			},
+			OK: true,
+		}
+	}
+
+	features := buildClaudeUsageFeatures(snapshot, analysis, rawInputTokens)
+	targets := claudeUsageTargetsForFeatures(features)
+	usage, ok := allocateClaudeUsage(rawInputTokens, rawOutputTokens, snapshot.TTL, targets)
+	if !ok {
+		return preparedClaudeUsage{Usage: rawUsage}
+	}
+
+	return preparedClaudeUsage{
+		Usage: usage,
+		Commit: promptCacheCommit{
+			TaskKey:            analysis.TaskKey,
+			RequestFingerprint: analysis.RequestFingerprint,
+			TTL:                snapshot.TTL,
+			Prefixes:           analysis.Prefixes,
+			Usage:              usage,
+			SuccessfulAt:       now,
+		},
+		OK: true,
+	}
+}
+
 func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", 405)
@@ -828,23 +884,23 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	req.Model = actualModel
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
-	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
-	cacheProfile := h.promptCache.BuildClaudeProfile(effectiveReq, estimatedInputTokens)
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	analysis := analyzeClaudeRequest(effectiveReq, apiKeyID)
+	snapshot := h.promptCache.Snapshot(analysis, time.Now())
 
 	// 转换请求
 	kiroPayload := ClaudeToKiro(&req, thinking)
 
 	// Stream or non-stream
-	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
-		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, analysis, snapshot, apiKeyID)
 	} else {
-		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, analysis, snapshot, apiKeyID)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, analysis claudeRequestAnalysis, snapshot promptCacheSnapshot, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -860,17 +916,23 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 	reqStart := time.Now()
 	msgID := "msg_" + uuid.New().String()
-	startInputTokens := estimatedInputTokens
+	estimatedInputTokens := maxInt(analysis.EstimatedInputTokens, 1)
 	excluded := make(map[string]bool)
 	var lastErr error
 	messageStarted := false
-	var messageStartUsage promptCacheUsage
+	var clientWriteErr error
+
+	sendSSE := func(event string, data interface{}) {
+		if err := h.sendSSE(w, flusher, event, data); err != nil && clientWriteErr == nil {
+			clientWriteErr = err
+		}
+	}
 
 	ensureMessageStart := func() {
 		if messageStarted {
 			return
 		}
-		h.sendSSE(w, flusher, "message_start", map[string]interface{}{
+		sendSSE("message_start", map[string]interface{}{
 			"type": "message_start",
 			"message": map[string]interface{}{
 				"id":            msgID,
@@ -880,7 +942,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				"model":         model,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
-				"usage":         buildClaudeUsageMap(startInputTokens, 0, messageStartUsage, cacheProfile != nil),
+				"usage": ClaudeUsage{
+					InputTokens: estimatedInputTokens,
+				},
 			},
 		})
 		messageStarted = true
@@ -897,8 +961,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			h.handleAccountFailure(account, err)
 			continue
 		}
-		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
-		messageStartUsage = cacheUsage
 
 		var inputTokens, outputTokens int
 		var credits float64
@@ -914,7 +976,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			if activeBlockIndex < 0 {
 				return
 			}
-			h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+			sendSSE("content_block_stop", map[string]interface{}{
 				"type":  "content_block_stop",
 				"index": activeBlockIndex,
 			})
@@ -933,7 +995,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			nextContentIndex++
 
 			if blockType == "thinking" {
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				sendSSE("content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
 					"content_block": map[string]string{
@@ -942,7 +1004,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					},
 				})
 			} else {
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				sendSSE("content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
 					"content_block": map[string]string{
@@ -969,7 +1031,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				sendSSE("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": text},
@@ -996,7 +1058,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				sendSSE("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": outputText},
@@ -1006,7 +1068,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				sendSSE("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": text},
@@ -1033,7 +1095,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				}
 				if text != "" {
 					startContentBlock("thinking")
-					h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+					sendSSE("content_block_delta", map[string]interface{}{
 						"type":  "content_block_delta",
 						"index": activeBlockIndex,
 						"delta": map[string]string{"type": "thinking_delta", "thinking": text},
@@ -1177,7 +1239,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				idx := nextContentIndex
 				nextContentIndex++
 
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				sendSSE("content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
 					"content_block": map[string]interface{}{
@@ -1189,7 +1251,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				})
 
 				inputJSON, _ := json.Marshal(tu.Input)
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				sendSSE("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": idx,
 					"delta": map[string]interface{}{
@@ -1198,7 +1260,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					},
 				})
 
-				h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+				sendSSE("content_block_stop", map[string]interface{}{
 					"type":  "content_block_stop",
 					"index": idx,
 				})
@@ -1224,7 +1286,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				continue
 			}
 			h.recordFailureWithDetails("claude", model, account.ID, err)
-			h.sendSSE(w, flusher, "error", map[string]interface{}{
+			sendSSE("error", map[string]interface{}{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": err.Error()},
 			})
@@ -1255,7 +1317,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		h.promptCache.Update(account.ID, cacheProfile)
 		h.recordSuccessLog("claude", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		stopReason := "end_turn"
@@ -1263,18 +1324,37 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			stopReason = "tool_use"
 		}
 
+		prepared := preparedClaudeUsage{
+			Usage: ClaudeUsage{
+				InputTokens:  inputTokens,
+				OutputTokens: outputTokens,
+			},
+		}
+		if payload == nil || !payload.WasTruncated {
+			prepared = prepareFinalClaudeUsage(
+				inputTokens,
+				outputTokens,
+				analysis,
+				snapshot,
+				time.Now(),
+			)
+		}
+
 		ensureMessageStart()
-		h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
+		sendSSE("message_delta", map[string]interface{}{
 			"type": "message_delta",
 			"delta": map[string]interface{}{
 				"stop_reason": stopReason,
 			},
-			"usage": buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, cacheProfile != nil),
+			"usage": prepared.Usage,
 		})
 
-		h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
+		sendSSE("message_stop", map[string]interface{}{
 			"type": "message_stop",
 		})
+		if prepared.OK {
+			h.promptCache.Commit(prepared.Commit)
+		}
 		return
 	}
 
@@ -1287,10 +1367,16 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
 }
 
-func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
-	jsonData, _ := json.Marshal(data)
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(jsonData))
+func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, jsonData); err != nil {
+		return err
+	}
 	flusher.Flush()
+	return nil
 }
 
 // backgroundStatsSaver 后台定时保存统计数据
@@ -1441,10 +1527,11 @@ func (h *Handler) getRequestLogs() []RequestLog {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, analysis claudeRequestAnalysis, snapshot promptCacheSnapshot, apiKeyID string) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	reqStart := time.Now()
+	estimatedInputTokens := maxInt(analysis.EstimatedInputTokens, 1)
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
@@ -1457,7 +1544,6 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			h.handleAccountFailure(account, err)
 			continue
 		}
-		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
 		var content string
 		var thinkingContent string
@@ -1517,7 +1603,6 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		h.promptCache.Update(account.ID, cacheProfile)
 		h.recordSuccessLog("claude", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		responseThinkingContent := rawThinkingContent
@@ -1538,18 +1623,32 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			}
 		}
 
-		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
-		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
-		resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
-		resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
-		if cacheProfile != nil {
-			resp.Usage.CacheCreation = ClaudeCacheCreationUsage{
-				Ephemeral5mInputTokens: cacheUsage.CacheCreation5mInputTokens,
-				Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,
-			}
+		prepared := preparedClaudeUsage{
+			Usage: ClaudeUsage{
+				InputTokens:  inputTokens,
+				OutputTokens: outputTokens,
+			},
 		}
+		if payload == nil || !payload.WasTruncated {
+			prepared = prepareFinalClaudeUsage(
+				inputTokens,
+				outputTokens,
+				analysis,
+				snapshot,
+				time.Now(),
+			)
+		}
+
+		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
+		resp.Usage = prepared.Usage
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			logger.Warnf("[Claude] 同步响应写入失败：%v", err)
+			return
+		}
+		if prepared.OK {
+			h.promptCache.Commit(prepared.Commit)
+		}
 		return
 	}
 

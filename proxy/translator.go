@@ -341,7 +341,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	truncatePayloadToLimit(payload, systemPrompt != "")
+	payload.WasTruncated = truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
 }
@@ -1281,7 +1281,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	truncatePayloadToLimit(payload, systemPrompt != "")
+	payload.WasTruncated = truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
 }
@@ -1623,13 +1623,15 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 // A single placeholder note (truncationPlaceholder) is inserted where older
 // turns were removed so the model is aware context was elided. hasPriming
 // indicates whether history begins with the 2-entry system priming pair.
-func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
+func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) bool {
 	if payload == nil {
-		return
+		return false
 	}
+	payload.WasTruncated = false
 	if payloadByteSize(payload) <= maxPayloadBytes {
-		return
+		return false
 	}
+	payload.WasTruncated = true
 
 	history := payload.ConversationState.History
 	primingCount := 0
@@ -1691,6 +1693,7 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	if payloadByteSize(payload) > maxPayloadBytes {
 		truncateCurrentMessage(payload)
 	}
+	return true
 }
 
 // historyEntryByteSize returns the serialized size of a single history entry,

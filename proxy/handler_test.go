@@ -98,7 +98,23 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 
 	rec := httptest.NewRecorder()
-	h.handleClaudeNonStream(rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	analysis := analyzeClaudeRequest(&ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "hello"},
+		},
+	}, anonymousCallerScope)
+	snapshot := h.promptCache.Snapshot(analysis, time.Now())
+	h.handleClaudeNonStream(
+		rec,
+		payload,
+		"claude-sonnet-4.5",
+		false,
+		claudeThinkingResponseOptions{},
+		analysis,
+		snapshot,
+		"",
+	)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected retry to succeed, status=%d body=%s", rec.Code, rec.Body.String())
