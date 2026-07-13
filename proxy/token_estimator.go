@@ -47,6 +47,10 @@ func estimateApproxTokens(text string) int {
 }
 
 func estimateClaudeRequestInputTokens(req *ClaudeRequest) int {
+	return analyzeClaudeRequest(req, anonymousCallerScope).EstimatedInputTokens
+}
+
+func estimateClaudeRequestInputTokensLegacy(req *ClaudeRequest) int {
 	if req == nil {
 		return 0
 	}

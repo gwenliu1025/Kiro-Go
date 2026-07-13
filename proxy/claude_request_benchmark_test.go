@@ -39,8 +39,19 @@ func benchmarkLegacyClaudeAnalysis(b *testing.B, size int) {
 	b.SetBytes(int64(size))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tokens := estimateClaudeRequestInputTokens(req)
+		tokens := estimateClaudeRequestInputTokensLegacy(req)
 		_ = tracker.BuildClaudeProfile(req, tokens)
+	}
+}
+
+func benchmarkNewClaudeAnalysis(b *testing.B, size int) {
+	req := benchmarkClaudeRequest(size)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(size))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = analyzeClaudeRequest(req, "benchmark-api-key")
 	}
 }
 
@@ -58,4 +69,20 @@ func BenchmarkLegacyClaudeAnalysis512KB(b *testing.B) {
 
 func BenchmarkLegacyClaudeAnalysis2MB(b *testing.B) {
 	benchmarkLegacyClaudeAnalysis(b, 2<<20)
+}
+
+func BenchmarkNewClaudeAnalysis1KB(b *testing.B) {
+	benchmarkNewClaudeAnalysis(b, 1<<10)
+}
+
+func BenchmarkNewClaudeAnalysis64KB(b *testing.B) {
+	benchmarkNewClaudeAnalysis(b, 64<<10)
+}
+
+func BenchmarkNewClaudeAnalysis512KB(b *testing.B) {
+	benchmarkNewClaudeAnalysis(b, 512<<10)
+}
+
+func BenchmarkNewClaudeAnalysis2MB(b *testing.B) {
+	benchmarkNewClaudeAnalysis(b, 2<<20)
 }

@@ -134,3 +134,42 @@ BenchmarkClaudeFirstToken2MB-24      	      21	  49307952 ns/op	  42.53 MB/s	  4
 BenchmarkClaudeFirstToken2MB-24      	      26	  51964350 ns/op	  40.36 MB/s	  51941569 first-token-ns/op	104024837 B/op	     945 allocs/op
 BenchmarkClaudeFirstToken2MB-24      	      16	  63267838 ns/op	  33.15 MB/s	  63083944 first-token-ns/op	96880457 B/op	     926 allocs/op
 ```
+
+## 新单遍请求分析结果
+
+命令：
+
+```powershell
+go test ./proxy -run '^$' -bench '^BenchmarkNewClaudeAnalysis' -benchmem -count=5
+```
+
+原始结果：
+
+```text
+goos: windows
+goarch: amd64
+pkg: kiro-go/proxy
+cpu: Intel(R) Core(TM) Ultra 9 275HX
+BenchmarkNewClaudeAnalysis1KB-24      	   82813	     14543 ns/op	  70.41 MB/s	    3648 B/op	     280 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24      	   89988	     12972 ns/op	  78.94 MB/s	    3648 B/op	     280 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24      	   91908	     12994 ns/op	  78.81 MB/s	    3648 B/op	     280 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24      	   86229	     13253 ns/op	  77.27 MB/s	    3648 B/op	     280 allocs/op
+BenchmarkNewClaudeAnalysis1KB-24      	   96470	     16746 ns/op	  61.15 MB/s	    3648 B/op	     280 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24     	    3051	    484430 ns/op	 135.28 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24     	    4040	    322408 ns/op	 203.27 MB/s	   34705 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24     	    3930	    433621 ns/op	 151.14 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24     	    3566	    307150 ns/op	 213.37 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis64KB-24     	    3974	    438117 ns/op	 149.59 MB/s	   34705 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24    	     496	   2604742 ns/op	 201.28 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24    	     331	   3373963 ns/op	 155.39 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24    	     476	   2579555 ns/op	 203.25 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24    	     464	   2723339 ns/op	 192.52 MB/s	   34706 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis512KB-24    	     471	   3484929 ns/op	 150.44 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24      	     121	  11120081 ns/op	 188.59 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24      	     120	  12168232 ns/op	 172.35 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24      	     100	  11453239 ns/op	 183.11 MB/s	   34704 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24      	     118	   9920244 ns/op	 211.40 MB/s	   34714 B/op	     133 allocs/op
+BenchmarkNewClaudeAnalysis2MB-24      	     122	  10121364 ns/op	 207.20 MB/s	   34704 B/op	     133 allocs/op
+```
+
+与旧双遍相比，新分析器在四档输入上均减少运行时间；512 KB 和 2 MB 请求的每次分配量稳定在约 34 KB，不再随正文大小线性放大。
