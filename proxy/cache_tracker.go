@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -12,6 +13,65 @@ import (
 )
 
 const defaultPromptCacheTTL = 5 * time.Minute
+const promptCacheAlgorithmVersion = "native-high-cache-v1"
+const promptCacheShardCount = 32
+const promptCacheRetention = 70 * time.Minute
+
+type promptCachePhase uint8
+
+const (
+	promptCachePhaseFirst promptCachePhase = iota
+	promptCachePhaseContinue
+	promptCachePhaseRebuild
+)
+
+type promptCacheTTL uint8
+
+const (
+	promptCacheTTL5m promptCacheTTL = iota + 1
+	promptCacheTTL1h
+)
+
+type promptCacheSnapshot struct {
+	TaskKey             [32]byte
+	RequestFingerprint  [32]byte
+	TTL                 promptCacheTTL
+	Phase               promptCachePhase
+	MatchedPrefixTokens int
+	CurrentCacheable    int
+	SuccessfulRounds    int
+	AgeRatio            float64
+	ExistingUsage       *ClaudeUsage
+}
+
+type promptCacheCommit struct {
+	TaskKey            [32]byte
+	RequestFingerprint [32]byte
+	TTL                promptCacheTTL
+	Prefixes           []claudePrefixPoint
+	Usage              ClaudeUsage
+	SuccessfulAt       time.Time
+}
+
+type promptCacheUsageRecord struct {
+	Usage        ClaudeUsage
+	SuccessfulAt time.Time
+}
+
+type promptCacheTaskState struct {
+	TTL              promptCacheTTL
+	SuccessfulRounds int
+	LastSuccessfulAt time.Time
+	LastActivityAt   time.Time
+	LastCreationAt   time.Time
+	Prefixes         map[[32]byte]int
+	Usages           map[[32]byte]promptCacheUsageRecord
+}
+
+type promptCacheShard struct {
+	mu    sync.Mutex
+	tasks map[[32]byte]*promptCacheTaskState
+}
 
 // Anthropic requires cached prefixes to reach a minimum token count before
 // caching takes effect. Breakpoints below this threshold are excluded from
@@ -53,6 +113,9 @@ type promptCacheEntry struct {
 }
 
 type promptCacheTracker struct {
+	shards [promptCacheShardCount]promptCacheShard
+
+	// 以下字段只为尚未切换的新旧 handler 过渡期保留，任务 6 删除。
 	mu               sync.Mutex
 	entriesByAccount map[string]map[[32]byte]promptCacheEntry
 	maxSupportedTTL  time.Duration
@@ -62,10 +125,210 @@ func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 	if maxTTL <= 0 {
 		maxTTL = defaultPromptCacheTTL
 	}
-	return &promptCacheTracker{
+	tracker := &promptCacheTracker{
 		entriesByAccount: make(map[string]map[[32]byte]promptCacheEntry),
 		maxSupportedTTL:  maxTTL,
 	}
+	for i := range tracker.shards {
+		tracker.shards[i].tasks = make(map[[32]byte]*promptCacheTaskState)
+	}
+	return tracker
+}
+
+func ttlForTask(taskKey [32]byte) promptCacheTTL {
+	hasher := sha256.New()
+	_, _ = hasher.Write(taskKey[:])
+	_, _ = hasher.Write([]byte(promptCacheAlgorithmVersion))
+	sum := hasher.Sum(nil)
+	if binary.BigEndian.Uint16(sum[:2])%100 < 20 {
+		return promptCacheTTL5m
+	}
+	return promptCacheTTL1h
+}
+
+func (t *promptCacheTracker) Snapshot(analysis claudeRequestAnalysis, now time.Time) promptCacheSnapshot {
+	snapshot := promptCacheSnapshot{
+		TaskKey:            analysis.TaskKey,
+		RequestFingerprint: analysis.RequestFingerprint,
+		TTL:                ttlForTask(analysis.TaskKey),
+		Phase:              promptCachePhaseFirst,
+		CurrentCacheable:   analysis.CacheableTokens,
+	}
+	if t == nil {
+		return snapshot
+	}
+
+	shard := t.shardForTask(analysis.TaskKey)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	t.pruneShardLocked(shard, now)
+
+	state := shard.tasks[analysis.TaskKey]
+	if state == nil {
+		return snapshot
+	}
+
+	snapshot.TTL = state.TTL
+	snapshot.SuccessfulRounds = state.SuccessfulRounds
+	active, ageRatio := promptCacheTaskActive(state, now)
+	snapshot.AgeRatio = ageRatio
+	if !active {
+		snapshot.Phase = promptCachePhaseRebuild
+		return snapshot
+	}
+
+	if record, ok := state.Usages[analysis.RequestFingerprint]; ok {
+		usage := cloneClaudeUsage(record.Usage)
+		snapshot.ExistingUsage = &usage
+		snapshot.Phase = promptCachePhaseContinue
+		if state.TTL == promptCacheTTL5m {
+			state.LastActivityAt = now
+			snapshot.AgeRatio = 0
+		}
+		return snapshot
+	}
+
+	for _, prefix := range analysis.Prefixes {
+		storedTokens, ok := state.Prefixes[prefix.Fingerprint]
+		if !ok {
+			continue
+		}
+		matched := minInt(storedTokens, prefix.CumulativeTokens)
+		if matched > snapshot.MatchedPrefixTokens {
+			snapshot.MatchedPrefixTokens = matched
+		}
+	}
+
+	if snapshot.MatchedPrefixTokens > 0 {
+		snapshot.Phase = promptCachePhaseContinue
+		if state.TTL == promptCacheTTL5m {
+			state.LastActivityAt = now
+			snapshot.AgeRatio = 0
+		}
+	}
+	return snapshot
+}
+
+func (t *promptCacheTracker) Commit(commit promptCacheCommit) {
+	if t == nil || commit.SuccessfulAt.IsZero() {
+		return
+	}
+
+	stableTTL := ttlForTask(commit.TaskKey)
+	shard := t.shardForTask(commit.TaskKey)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	t.pruneShardLocked(shard, commit.SuccessfulAt)
+
+	state := shard.tasks[commit.TaskKey]
+	if state != nil {
+		active, _ := promptCacheTaskActive(state, commit.SuccessfulAt)
+		if !active {
+			delete(shard.tasks, commit.TaskKey)
+			state = nil
+		}
+	}
+	if state == nil {
+		state = &promptCacheTaskState{
+			TTL:      stableTTL,
+			Prefixes: make(map[[32]byte]int, len(commit.Prefixes)),
+			Usages:   make(map[[32]byte]promptCacheUsageRecord),
+		}
+		shard.tasks[commit.TaskKey] = state
+	}
+
+	if _, exists := state.Usages[commit.RequestFingerprint]; exists {
+		return
+	}
+
+	state.TTL = stableTTL
+	state.SuccessfulRounds++
+	state.LastSuccessfulAt = commit.SuccessfulAt
+	state.LastActivityAt = commit.SuccessfulAt
+	if commit.Usage.CacheCreationInputTokens > 0 {
+		state.LastCreationAt = commit.SuccessfulAt
+	}
+	if state.LastCreationAt.IsZero() {
+		state.LastCreationAt = commit.SuccessfulAt
+	}
+
+	for _, prefix := range commit.Prefixes {
+		if existing := state.Prefixes[prefix.Fingerprint]; prefix.CumulativeTokens > existing {
+			state.Prefixes[prefix.Fingerprint] = prefix.CumulativeTokens
+		}
+	}
+	state.Usages[commit.RequestFingerprint] = promptCacheUsageRecord{
+		Usage:        cloneClaudeUsage(commit.Usage),
+		SuccessfulAt: commit.SuccessfulAt,
+	}
+}
+
+func (t *promptCacheTracker) shardForTask(taskKey [32]byte) *promptCacheShard {
+	index := binary.BigEndian.Uint32(taskKey[:4]) % promptCacheShardCount
+	return &t.shards[index]
+}
+
+func (t *promptCacheTracker) pruneShardLocked(shard *promptCacheShard, now time.Time) {
+	for taskKey, state := range shard.tasks {
+		if now.Sub(state.LastSuccessfulAt) > promptCacheRetention {
+			delete(shard.tasks, taskKey)
+		}
+	}
+}
+
+func (t *promptCacheTracker) taskCount() int {
+	if t == nil {
+		return 0
+	}
+	total := 0
+	for i := range t.shards {
+		shard := &t.shards[i]
+		shard.mu.Lock()
+		total += len(shard.tasks)
+		shard.mu.Unlock()
+	}
+	return total
+}
+
+func promptCacheTaskActive(state *promptCacheTaskState, now time.Time) (bool, float64) {
+	if state == nil {
+		return false, 1
+	}
+
+	var base time.Time
+	var ttl time.Duration
+	switch state.TTL {
+	case promptCacheTTL5m:
+		base = state.LastActivityAt
+		ttl = 5 * time.Minute
+	case promptCacheTTL1h:
+		base = state.LastCreationAt
+		ttl = time.Hour
+	default:
+		return false, 1
+	}
+	if base.IsZero() {
+		return false, 1
+	}
+
+	elapsed := now.Sub(base)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	ageRatio := float64(elapsed) / float64(ttl)
+	if ageRatio > 1 {
+		ageRatio = 1
+	}
+	return elapsed <= ttl, ageRatio
+}
+
+func cloneClaudeUsage(usage ClaudeUsage) ClaudeUsage {
+	cloned := usage
+	if usage.CacheCreation != nil {
+		cacheCreation := *usage.CacheCreation
+		cloned.CacheCreation = &cacheCreation
+	}
+	return cloned
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
