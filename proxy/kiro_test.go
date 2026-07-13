@@ -107,6 +107,37 @@ func TestParseEventStreamNilCallbackFieldsAreNoOp(t *testing.T) {
 	}
 }
 
+func TestParseEventStreamIncompleteUsageDoesNotReportFinalUsage(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload map[string]interface{}
+	}{
+		{name: "仅输入 token", payload: map[string]interface{}{"inputTokens": 120}},
+		{name: "仅输出 token", payload: map[string]interface{}{"outputTokens": 32}},
+		{name: "孤立总 token", payload: map[string]interface{}{"totalTokens": 152}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			err := parseEventStream(
+				bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", tc.payload)),
+				&KiroStreamCallback{
+					OnFinalUsage: func(_, _ int) {
+						called = true
+					},
+				},
+			)
+			if err != nil {
+				t.Fatalf("解析不完整 usage 失败：%v", err)
+			}
+			if called {
+				t.Fatalf("不完整 usage 不得触发终态回调")
+			}
+		})
+	}
+}
+
 func TestHandleToolUseEventGeneratesMissingToolUseID(t *testing.T) {
 	var toolUses []KiroToolUse
 	current := handleToolUseEvent(map[string]interface{}{

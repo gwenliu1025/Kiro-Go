@@ -356,6 +356,41 @@ func TestPromptCacheTrackerPrunesAfterSeventyMinutes(t *testing.T) {
 	}
 }
 
+func TestPromptCacheTrackerExpiredRefreshDoesNotRecreatePrunedTask(t *testing.T) {
+	analysis := analysisForTTL(t, promptCacheTTL1h)
+	tracker := newPromptCacheTracker(time.Hour)
+	now := time.Unix(1_700_000_000, 0)
+	tracker.Commit(promptCacheCommit{
+		TaskKey:            analysis.TaskKey,
+		RequestFingerprint: analysis.RequestFingerprint,
+		TTL:                promptCacheTTL1h,
+		Prefixes:           analysis.Prefixes,
+		Usage:              testClaudeUsage(100, 10),
+		SuccessfulAt:       now,
+	})
+
+	staleSnapshot := tracker.Snapshot(analysis, now.Add(59*time.Minute))
+	if staleSnapshot.ExistingUsage == nil {
+		t.Fatalf("59 分钟时应取得可复用 usage")
+	}
+
+	tracker.Commit(promptCacheCommit{
+		TaskKey:            analysis.TaskKey,
+		RequestFingerprint: analysis.RequestFingerprint,
+		TTL:                promptCacheTTL1h,
+		SuccessfulAt:       now.Add(71 * time.Minute),
+		RefreshExisting:    true,
+	})
+
+	if tracker.taskCount() != 0 {
+		t.Fatalf("70 分钟清理后的旧快照刷新不得重建任务")
+	}
+	afterRefresh := tracker.Snapshot(analysis, now.Add(71*time.Minute))
+	if afterRefresh.Phase != promptCachePhaseFirst || afterRefresh.ExistingUsage != nil {
+		t.Fatalf("旧快照刷新后应保持新任务状态：%+v", afterRefresh)
+	}
+}
+
 func TestPromptCacheTrackerIgnoresUpstreamAccountSwitch(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	req := analysisTestRequest()
