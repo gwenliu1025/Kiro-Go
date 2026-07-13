@@ -135,6 +135,58 @@ func TestClaudeFailedUpstreamDoesNotCommitCacheState(t *testing.T) {
 	}
 }
 
+func TestClaudeMissingFinalUsageDoesNotCommitCacheState(t *testing.T) {
+	tests := []struct {
+		name        string
+		stream      bool
+		contentOnly bool
+	}{
+		{name: "同步空响应", stream: false},
+		{name: "同步仅正文", stream: false, contentOnly: true},
+		{name: "流式空响应", stream: true},
+		{name: "流式仅正文", stream: true, contentOnly: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := setupClaudeContractHandler(t, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				if tc.contentOnly {
+					_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+						"content": "只有正文，没有终态 token usage",
+					}))
+				}
+			}))
+			defer upstream.Close()
+			defer swapKiroEndpointsForTest(t, upstream)()
+
+			recorder := performClaudeContractRequest(
+				t,
+				handler,
+				tc.stream,
+				strings.Repeat("缺少终态用量的长请求", 4096),
+			)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("缺少终态 usage 的响应仍应安全降级：status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+
+			var usage ClaudeUsage
+			if tc.stream {
+				usage, _ = decodeClaudeFinalSSEUsage(t, recorder.Body.String())
+			} else {
+				usage, _ = decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
+			}
+			if usage.CacheReadInputTokens != 0 || usage.CacheCreationInputTokens != 0 {
+				t.Fatalf("缺少终态 usage 时不得生成高缓存用量：%+v", usage)
+			}
+			if handler.promptCache.taskCount() != 0 {
+				t.Fatalf("缺少终态 usage 时不得提交高缓存状态")
+			}
+		})
+	}
+}
+
 func TestClaudeRetryFingerprintDoesNotAdvanceRound(t *testing.T) {
 	handler := setupClaudeContractHandler(t, 1)
 	upstream := newClaudeUsageUpstream(t, "幂等响应", 10_000)

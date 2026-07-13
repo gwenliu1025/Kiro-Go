@@ -240,6 +240,7 @@ type KiroStreamCallback struct {
 	OnText         func(text string, isThinking bool)
 	OnToolUse      func(toolUse KiroToolUse)
 	OnComplete     func(inputTokens, outputTokens int)
+	OnFinalUsage   func(inputTokens, outputTokens int)
 	OnError        func(err error)
 	OnCredits      func(credits float64)
 	OnContextUsage func(percentage float64)
@@ -438,6 +439,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 	// Read directly without bufio to avoid buffering latency in streaming responses.
 	var inputTokens, outputTokens int
+	var inputTokensSeen, outputTokensSeen bool
 	var totalCredits float64
 	var currentToolUse *toolUseState
 	var lastAssistantContent string
@@ -484,7 +486,13 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			continue
 		}
 
-		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
+		inputTokens, outputTokens, inputTokensSeen, outputTokensSeen = updateTokensFromEvent(
+			event,
+			inputTokens,
+			outputTokens,
+			inputTokensSeen,
+			outputTokensSeen,
+		)
 
 		// Dispatch by event type.
 		switch eventType {
@@ -525,18 +533,29 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		callback.OnCredits(totalCredits)
 	}
 
+	if inputTokensSeen && outputTokensSeen && callback.OnFinalUsage != nil {
+		callback.OnFinalUsage(inputTokens, outputTokens)
+	}
 	if callback.OnComplete != nil {
 		callback.OnComplete(inputTokens, outputTokens)
 	}
 	return nil
 }
 
-func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int) {
+func updateTokensFromEvent(
+	event map[string]interface{},
+	currentInputTokens int,
+	currentOutputTokens int,
+	currentInputTokensSeen bool,
+	currentOutputTokensSeen bool,
+) (int, int, bool, bool) {
 	candidates := []map[string]interface{}{event}
 	collectUsageMaps(event, &candidates)
 
 	inputTokens := currentInputTokens
 	outputTokens := currentOutputTokens
+	inputTokensSeen := currentInputTokensSeen
+	outputTokensSeen := currentOutputTokensSeen
 
 	for _, usage := range candidates {
 		if usage == nil {
@@ -548,6 +567,7 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 			"output_tokens", "completion_tokens", "total_output_tokens",
 		); ok {
 			outputTokens = v
+			outputTokensSeen = true
 		}
 
 		if v, ok := readTokenNumber(usage,
@@ -555,19 +575,21 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 			"input_tokens", "prompt_tokens", "total_input_tokens",
 		); ok {
 			inputTokens = v
+			inputTokensSeen = true
 			continue
 		}
 
-		uncached, _ := readTokenNumber(usage, "uncachedInputTokens", "uncached_input_tokens")
-		cacheRead, _ := readTokenNumber(usage, "cacheReadInputTokens", "cache_read_input_tokens")
-		cacheWrite, _ := readTokenNumber(usage, "cacheWriteInputTokens", "cache_write_input_tokens", "cacheCreationInputTokens", "cache_creation_input_tokens")
-		if uncached+cacheRead+cacheWrite > 0 {
+		uncached, uncachedSeen := readTokenNumber(usage, "uncachedInputTokens", "uncached_input_tokens")
+		cacheRead, cacheReadSeen := readTokenNumber(usage, "cacheReadInputTokens", "cache_read_input_tokens")
+		cacheWrite, cacheWriteSeen := readTokenNumber(usage, "cacheWriteInputTokens", "cache_write_input_tokens", "cacheCreationInputTokens", "cache_creation_input_tokens")
+		if uncachedSeen || cacheReadSeen || cacheWriteSeen {
 			inputTokens = uncached + cacheRead + cacheWrite
+			inputTokensSeen = true
 			continue
 		}
 
 		total, ok := readTokenNumber(usage, "totalTokens", "total_tokens")
-		if ok && total > 0 {
+		if ok && outputTokensSeen && total >= outputTokens {
 			candidateOutput := outputTokens
 			if v, vok := readTokenNumber(usage,
 				"outputTokens", "completionTokens", "totalOutputTokens",
@@ -575,13 +597,14 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 			); vok {
 				candidateOutput = v
 			}
-			if total-candidateOutput > 0 {
+			if total >= candidateOutput {
 				inputTokens = total - candidateOutput
+				inputTokensSeen = true
 			}
 		}
 	}
 
-	return inputTokens, outputTokens
+	return inputTokens, outputTokens, inputTokensSeen, outputTokensSeen
 }
 
 // getContextWindowSize returns the context window size (in tokens) for a model.

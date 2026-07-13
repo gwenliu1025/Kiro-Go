@@ -219,6 +219,73 @@ func TestPromptCacheTrackerFiveMinuteSuccessfulRetryRefreshesWithoutAdvancingRou
 	}
 }
 
+func TestPromptCacheTrackerFiveMinuteIdempotentRetryCrossingTTLKeepsPrefixes(t *testing.T) {
+	analysis := analysisForTTL(t, promptCacheTTL5m)
+	tracker := newPromptCacheTracker(time.Hour)
+	now := time.Unix(1_700_000_000, 0)
+	usage := testClaudeUsage(100, 10)
+	tracker.Commit(promptCacheCommit{
+		TaskKey:            analysis.TaskKey,
+		RequestFingerprint: analysis.RequestFingerprint,
+		TTL:                promptCacheTTL5m,
+		Prefixes:           analysis.Prefixes,
+		Usage:              usage,
+		SuccessfulAt:       now,
+	})
+
+	retry := tracker.Snapshot(analysis, now.Add(4*time.Minute))
+	if retry.ExistingUsage == nil {
+		t.Fatalf("4 分钟时应命中幂等 usage")
+	}
+	prepared := prepareFinalClaudeUsage(10_000, 20, analysis, retry, now.Add(6*time.Minute))
+	if !prepared.OK {
+		t.Fatalf("幂等重试应生成刷新提交：%+v", prepared)
+	}
+	tracker.Commit(prepared.Commit)
+
+	continued := continuedAnalysis(analysis, "api-key-ttl-5m-crossing")
+	afterRetry := tracker.Snapshot(continued, now.Add(10*time.Minute))
+	if afterRetry.Phase != promptCachePhaseContinue || afterRetry.MatchedPrefixTokens == 0 {
+		t.Fatalf("跨过旧 5 分钟边界的成功幂等重试应保留前缀并刷新活动窗口：%+v", afterRetry)
+	}
+	if afterRetry.SuccessfulRounds != 1 {
+		t.Fatalf("跨 TTL 幂等重试不得推进轮次：得到 %d", afterRetry.SuccessfulRounds)
+	}
+}
+
+func TestPromptCacheTrackerOneHourIdempotentRetryCrossingTTLDoesNotRenewCreation(t *testing.T) {
+	analysis := analysisForTTL(t, promptCacheTTL1h)
+	tracker := newPromptCacheTracker(time.Hour)
+	now := time.Unix(1_700_000_000, 0)
+	usage := testClaudeUsage(100, 10)
+	tracker.Commit(promptCacheCommit{
+		TaskKey:            analysis.TaskKey,
+		RequestFingerprint: analysis.RequestFingerprint,
+		TTL:                promptCacheTTL1h,
+		Prefixes:           analysis.Prefixes,
+		Usage:              usage,
+		SuccessfulAt:       now,
+	})
+
+	retry := tracker.Snapshot(analysis, now.Add(59*time.Minute))
+	if retry.ExistingUsage == nil {
+		t.Fatalf("59 分钟时应命中幂等 usage")
+	}
+	prepared := prepareFinalClaudeUsage(10_000, 20, analysis, retry, now.Add(61*time.Minute))
+	if !prepared.OK {
+		t.Fatalf("幂等重试应生成刷新提交：%+v", prepared)
+	}
+	tracker.Commit(prepared.Commit)
+
+	afterRetry := tracker.Snapshot(analysis, now.Add(61*time.Minute+time.Second))
+	if afterRetry.Phase != promptCachePhaseRebuild || afterRetry.ExistingUsage != nil {
+		t.Fatalf("跨过 1 小时创建期限的幂等重试不得续期创建时间：%+v", afterRetry)
+	}
+	if afterRetry.SuccessfulRounds != 1 {
+		t.Fatalf("跨 TTL 幂等重试不得推进轮次：得到 %d", afterRetry.SuccessfulRounds)
+	}
+}
+
 func TestPromptCacheTrackerOneHourReadDoesNotExtendCreationExpiry(t *testing.T) {
 	analysis := analysisForTTL(t, promptCacheTTL1h)
 	tracker := newPromptCacheTracker(time.Hour)

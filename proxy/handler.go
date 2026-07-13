@@ -829,6 +829,7 @@ func prepareFinalClaudeUsage(
 				TTL:                snapshot.TTL,
 				Usage:              usage,
 				SuccessfulAt:       now,
+				RefreshExisting:    true,
 			},
 			OK: true,
 		}
@@ -965,6 +966,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
+		var finalUsageComplete bool
 		var toolUses []KiroToolUse
 		var nextContentIndex int
 		var rawContentBuilder strings.Builder
@@ -1269,6 +1271,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				inputTokens = inTok
 				outputTokens = outTok
 			},
+			OnFinalUsage: func(_, _ int) {
+				finalUsageComplete = true
+			},
 			OnCredits: func(c float64) {
 				credits = c
 			},
@@ -1330,7 +1335,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				OutputTokens: outputTokens,
 			},
 		}
-		if payload == nil || !payload.WasTruncated {
+		if finalUsageComplete && (payload == nil || !payload.WasTruncated) {
 			prepared = prepareFinalClaudeUsage(
 				inputTokens,
 				outputTokens,
@@ -1551,6 +1556,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
+		var finalUsageComplete bool
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
@@ -1566,6 +1572,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			OnComplete: func(inTok, outTok int) {
 				inputTokens = inTok
 				outputTokens = outTok
+			},
+			OnFinalUsage: func(_, _ int) {
+				finalUsageComplete = true
 			},
 			OnCredits: func(c float64) {
 				credits = c
@@ -1629,7 +1638,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				OutputTokens: outputTokens,
 			},
 		}
-		if payload == nil || !payload.WasTruncated {
+		if finalUsageComplete && (payload == nil || !payload.WasTruncated) {
 			prepared = prepareFinalClaudeUsage(
 				inputTokens,
 				outputTokens,

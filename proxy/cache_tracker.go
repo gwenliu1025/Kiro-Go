@@ -51,6 +51,7 @@ type promptCacheCommit struct {
 	Prefixes           []claudePrefixPoint
 	Usage              ClaudeUsage
 	SuccessfulAt       time.Time
+	RefreshExisting    bool
 }
 
 type promptCacheUsageRecord struct {
@@ -175,6 +176,12 @@ func (t *promptCacheTracker) Commit(commit promptCacheCommit) {
 	t.pruneShardLocked(shard, commit.SuccessfulAt)
 
 	state := shard.tasks[commit.TaskKey]
+	if commit.RefreshExisting {
+		if state != nil {
+			refreshPromptCacheUsage(state, commit.RequestFingerprint, commit.SuccessfulAt)
+		}
+		return
+	}
 	if state != nil {
 		active, _ := promptCacheTaskActive(state, commit.SuccessfulAt)
 		if !active {
@@ -191,18 +198,7 @@ func (t *promptCacheTracker) Commit(commit promptCacheCommit) {
 		shard.tasks[commit.TaskKey] = state
 	}
 
-	if record, exists := state.Usages[commit.RequestFingerprint]; exists {
-		if commit.SuccessfulAt.After(state.LastSuccessfulAt) {
-			state.LastSuccessfulAt = commit.SuccessfulAt
-		}
-		if state.TTL == promptCacheTTL5m &&
-			commit.SuccessfulAt.After(state.LastActivityAt) {
-			state.LastActivityAt = commit.SuccessfulAt
-		}
-		if commit.SuccessfulAt.After(record.SuccessfulAt) {
-			record.SuccessfulAt = commit.SuccessfulAt
-			state.Usages[commit.RequestFingerprint] = record
-		}
+	if refreshPromptCacheUsage(state, commit.RequestFingerprint, commit.SuccessfulAt) {
 		return
 	}
 
@@ -226,6 +222,28 @@ func (t *promptCacheTracker) Commit(commit promptCacheCommit) {
 		Usage:        cloneClaudeUsage(commit.Usage),
 		SuccessfulAt: commit.SuccessfulAt,
 	}
+}
+
+func refreshPromptCacheUsage(
+	state *promptCacheTaskState,
+	requestFingerprint [32]byte,
+	successfulAt time.Time,
+) bool {
+	record, exists := state.Usages[requestFingerprint]
+	if !exists {
+		return false
+	}
+	if successfulAt.After(state.LastSuccessfulAt) {
+		state.LastSuccessfulAt = successfulAt
+	}
+	if state.TTL == promptCacheTTL5m && successfulAt.After(state.LastActivityAt) {
+		state.LastActivityAt = successfulAt
+	}
+	if successfulAt.After(record.SuccessfulAt) {
+		record.SuccessfulAt = successfulAt
+		state.Usages[requestFingerprint] = record
+	}
+	return true
 }
 
 func (t *promptCacheTracker) shardForTask(taskKey [32]byte) *promptCacheShard {
