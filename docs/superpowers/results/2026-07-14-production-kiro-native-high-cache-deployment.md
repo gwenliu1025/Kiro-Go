@@ -22,6 +22,8 @@
   内网和生产公网健康检查为 `200`。
 - 本轮只重建两台机器的 `kiro-go-pr131`，没有 pull、Prepare、Activate
   或重建 Sub2API，也没有重建其他容器。
+- 后续按用户明确要求，通过宿主机 systemd socket proxy 开放了两台机器的
+  公网 TCP `8321`；该端口开放没有修改 Compose，也没有重建或重启任何容器。
 
 ## 最小调优内容
 
@@ -123,6 +125,7 @@ Sub2API 容器访问 Kiro-Go：200
 Sub2API 宿主机回环：200
 Caddy 本机入口：200
 生产公网：https://xiaoqian.art/health -> 200
+Kiro-Go 公网管理页：http://154.36.172.65:8321/admin -> 200
 Sub2API updater：200
 ```
 
@@ -261,6 +264,7 @@ Kiro-Go 宿主机回环：200
 Sub2API 容器访问 Kiro-Go：200
 Sub2API 宿主机回环：200
 Caddy 本机入口：200
+Kiro-Go 公网管理页：http://157.254.187.242:8321/admin -> 200
 Sub2API updater：200
 Kiro-Go 本地 ERROR/panic/fatal：0/0/0
 ```
@@ -285,12 +289,68 @@ Compose 回滚备份：
 /home/ubuntu/staging/kiro-cache-read-tuning-grad-20260714-070611z/docker-compose.before-494dd90.yml
 ```
 
+## 公网 8321 端口转发
+
+用户明确要求开放两台机器的公网 `8321`，同时要求不要为端口开放重建
+Kiro-Go。最终采用宿主机 systemd socket proxy：
+
+```text
+公网 IP:8321
+  -> kiro-go-public-8321.socket
+  -> systemd-socket-proxyd
+  -> 127.0.0.1:8321
+  -> kiro-go-pr131:8321
+```
+
+Docker Compose 仍保持：
+
+```text
+127.0.0.1:8321:8321
+```
+
+公网入口：
+
+```text
+二号机：http://154.36.172.65:8321/admin
+毕业机：http://157.254.187.242:8321/admin
+```
+
+两台机器的 `/admin` 和 `/admin/app.js` 均已从本地公网直连验证为 `200`。
+根路径 `/` 返回 Kiro-Go 状态 JSON，不是管理页。
+
+systemd 单元：
+
+```text
+/etc/systemd/system/kiro-go-public-8321.socket
+/etc/systemd/system/kiro-go-public-8321.service
+```
+
+状态：
+
+```text
+socket：active/enabled
+容器启动时间差异：0
+```
+
+操作备份：
+
+```text
+二号机：
+/home/ubuntu/staging/kiro-public-8321-prod-20260714-075712z
+
+毕业机：
+/home/ubuntu/staging/kiro-public-8321-grad-20260714-075341z
+```
+
+公网管理页当前使用明文 HTTP，管理密码和管理请求没有 TLS 传输加密。
+
 ## 无关服务证明
 
 - 二号机切换前后，除 `kiro-go-pr131` 外 18 个容器启动时间差异为 `0`。
 - 毕业机切换前后，除 `kiro-go-pr131` 外 16 个容器启动时间差异为 `0`。
 - 两台机器的 Sub2API 镜像、状态和启动时间均未变化。
 - 本轮未执行 Sub2API pull、Prepare、Activate 或容器重建。
+- 公网 `8321` 开放前后，所有容器启动时间差异均为 `0`。
 
 ## 回滚
 
@@ -310,3 +370,12 @@ local/kiro-go:native-high-cache-1b94c33-20260714
 
 不要重建 Sub2API、PostgreSQL、Redis、Caddy、CPA、QQ/NapCat、
 TransitHub 或其他无关服务。
+
+公网 `8321` 转发可独立回滚，不需要重建任何容器：
+
+```bash
+systemctl disable --now kiro-go-public-8321.socket
+rm -f /etc/systemd/system/kiro-go-public-8321.socket
+rm -f /etc/systemd/system/kiro-go-public-8321.service
+systemctl daemon-reload
+```
