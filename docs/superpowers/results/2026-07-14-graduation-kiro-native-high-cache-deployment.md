@@ -174,6 +174,260 @@ updater socket /v1/status -> 200
 差异，不代表实际容器镜像；本次没有伪造代理状态，也没有调用会拉取远端旧
 `0.1.152` 的 Prepare/Activate。
 
+## 精确发布清单
+
+### Kiro-Go
+
+```text
+代码提交=701033bea1b662f101ab309b297df09b0457d5d2
+毕业机候选镜像=local/kiro-go:native-high-cache-701033b-20260714
+毕业机候选镜像 ID=sha256:594031079e4b01998ad24a89b1d4645e670f9eec67fac7eeb4fa3ec5bb64f0e2
+OCI revision=701033bea1b662f101ab309b297df09b0457d5d2
+OCI created=2026-07-14T00:54:28Z
+源码归档=kiro-go-701033b.tar.gz
+源码归档 SHA256=21a70b4928a06d8f6a7ded10a7f8d35feb70268af0abda714a995f866c5cb361
+```
+
+当前 Kiro-Go 资产只是毕业机本地候选，还没有形成供生产机按精确标签拉取的
+正式远端资产。生产发布时必须沿用 Kiro-Go 自身版本体系，并保证最终镜像的
+OCI revision 仍指向上述提交。
+
+### Sub2API
+
+```text
+代码提交=06a25c999c3d0cde157d30cde694fba2960e6d10
+应用版本=0.1.152
+毕业机候选镜像=ghcr.io/gwenliu1025/sub2api:0.1.152
+毕业机候选镜像 ID=sha256:015e79c653d710174b5e6bc0d8618a982fc28c8af0698d196d22ab4869148720
+OCI revision=06a25c999c3d0cde157d30cde694fba2960e6d10
+OCI created=2026-07-14T02:32:04Z
+镜像创建时间=2026-07-14T02:32:55.751765136Z
+源码归档=/home/ubuntu/staging/kiro-native-high-cache-20260714/sub2api-build-06a25c99-20260714-023000z/source.tar.gz
+源码归档 SHA256=8ac72157e7649abef3676f52b4bf0d561cea6a743dbc4c8bf8df960d918b74c9
+```
+
+当前远端 `v0.1.152`、GitHub Release 和 GHCR 同标签仍属于提交
+`ca7eaa4da82c492f9852fd3c9b480b1932ccc5c2`，GHCR 摘要为
+`sha256:8f7f1cb6874da8a1aa28095d3b66b14e80aa89cab34b011605f4d001787e0a0c`。
+生产切换前必须重新归档并发布，使 Git 标签、Release 二进制、
+`checksums.txt`、GHCR 镜像和源码提交全部一致指向 `06a25c99`。重新发布前
+不得在毕业机对 `0.1.152` 执行 pull、Prepare 或 Activate。
+
+### 定向变更范围
+
+本轮毕业机实际变更范围为：
+
+- 只重建 Compose 服务 `kiro-go-pr131` 和 `sub2api`；
+- Kiro-Go 恢复为容器内外统一 `8321`，宿主机只绑定
+  `127.0.0.1:8321`；
+- account `1910` 只修改 `credentials.base_url` 和清退相关 Extra，并写入
+  `account_changed` outbox 事件，未覆盖 API Key 或模型映射；
+- 不重建 PostgreSQL、Redis、Caddy、CPA、QQ/NapCat、TransitHub 或其他
+  无关服务。
+
+生产机应使用同一变更边界，但任何操作仍需单独明确授权。
+
+## 可执行回滚命令
+
+以下命令仅作为毕业机精确回滚手册保存，本轮没有执行。执行前必须再次确认
+目标主机为 `157.254.187.242`，并先保存当时的容器启动时间。所有命令都以
+`root` 身份在毕业机执行。
+
+### Kiro-Go 镜像、Compose 和端口回滚
+
+旧 Compose 的真实解析合同为：
+
+```text
+service=kiro-go-pr131
+image=kiro-go-pr131-kiro-go-pr131
+build.context=/home/ubuntu/kiro-go-pr131/src
+build.dockerfile=Dockerfile
+host port=8321
+container port=8080
+```
+
+旧 Compose 没有显式 `image` 字段，因此不能凭空填写镜像。先把已保存的旧
+镜像标记为 Compose 解析出的默认镜像名，再恢复两个 `0600` 备份文件，并用
+`--no-build --pull never` 定向重建：
+
+```bash
+set -euo pipefail
+
+test "$(docker image inspect \
+  local/kiro-go:rollback-1babd73-20260714 \
+  --format '{{.Id}}')" = \
+  "sha256:80cf711d465ff952cebed47082e8de06e289d83cdf3a112359dbe9a3d296dfac"
+
+docker image tag \
+  local/kiro-go:rollback-1babd73-20260714 \
+  kiro-go-pr131-kiro-go-pr131:latest
+
+install -m 0600 \
+  /home/ubuntu/kiro-go-pr131/docker-compose.yml.before-native-high-cache-20260714-0058 \
+  /home/ubuntu/kiro-go-pr131/docker-compose.yml
+install -m 0600 \
+  /home/ubuntu/kiro-go-pr131/data/config.json.before-native-high-cache-20260714-0058 \
+  /home/ubuntu/kiro-go-pr131/data/config.json
+
+docker compose \
+  --project-directory /home/ubuntu/kiro-go-pr131 \
+  -f /home/ubuntu/kiro-go-pr131/docker-compose.yml \
+  up -d --pull never --no-build --no-deps --force-recreate kiro-go-pr131
+```
+
+该旧合同把宿主机 `8321` 映射到容器 `8080`，且旧 Compose 没有限定
+`127.0.0.1`。回滚后必须复查防火墙和公网暴露，不得把旧端口合同误认为当前
+安全拓扑。
+
+### account 1910 Base URL 回滚
+
+Kiro-Go 回滚到容器端口 `8080` 后，必须以预期当前值为条件，把 account
+`1910` 的 Base URL 一并恢复；该事务不读取或改写 API Key、模型映射和其他
+凭据：
+
+```bash
+docker exec -i sub2api-postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+BEGIN;
+DO $rollback$
+DECLARE
+  affected integer;
+BEGIN
+  UPDATE accounts
+  SET credentials = jsonb_set(
+        COALESCE(credentials, '{}'::jsonb),
+        '{base_url}',
+        to_jsonb('http://kiro-go-pr131:8080'::text),
+        true
+      ),
+      updated_at = NOW()
+  WHERE id = 1910
+    AND deleted_at IS NULL
+    AND status = 'active'
+    AND schedulable = FALSE
+    AND credentials->>'base_url' = 'http://kiro-go-pr131:8321';
+
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  IF affected <> 1 THEN
+    RAISE EXCEPTION 'account 1910 Base URL 预期值不匹配，已回滚事务';
+  END IF;
+
+  INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+  VALUES ('account_changed', 1910, NULL, NULL);
+END
+$rollback$;
+COMMIT;
+SQL
+```
+
+### Sub2API 镜像回滚
+
+回到最后一个正式 `0.1.152` 资产时，使用提交 `ca7eaa4` 的精确本地标签。
+重新标记同版本 Compose 标签后，必须使用 `--pull never`，避免从远端获得与
+预期不同的资产：
+
+```bash
+set -euo pipefail
+
+test "$(docker image inspect \
+  local/sub2api:rollback-0.1.152-ca7eaa4-20260714 \
+  --format '{{.Id}}')" = \
+  "sha256:8f7f1cb6874da8a1aa28095d3b66b14e80aa89cab34b011605f4d001787e0a0c"
+
+docker image tag \
+  local/sub2api:rollback-0.1.152-ca7eaa4-20260714 \
+  ghcr.io/gwenliu1025/sub2api:0.1.152
+
+docker compose \
+  --project-directory /home/ubuntu/sub2api \
+  -f /home/ubuntu/sub2api/docker-compose.yml \
+  --env-file /home/ubuntu/sub2api/.env \
+  up -d --pull never --no-deps --force-recreate sub2api
+```
+
+如需回到本轮之前的上一毕业机候选，唯一替换项为：
+
+```text
+回滚标签=local/sub2api:rollback-0.1.152-1c0f22a-20260714-022741z
+预期镜像 ID=sha256:af52620f4dc4b293436d79e687520791198915f16e8b8826dcdb5a990f1cca9b
+```
+
+不得同时使用两个回滚来源，也不得在回滚过程中执行 pull、Prepare 或
+Activate。
+
+### Equivalent Cache 旧 Extra 回滚
+
+只有在 Sub2API 已回滚到仍需要旧 Equivalent Cache Extra 的旧运行时时，才
+恢复 account `1910` 的旧 Extra。以下命令从完整备份中只提取 `extra`，不会
+提取、输出或落盘 `credentials.api_key`：
+
+```bash
+set -euo pipefail
+
+{
+  cat <<'SQL'
+BEGIN;
+CREATE TEMP TABLE rollback_account_extra (payload jsonb);
+\copy rollback_account_extra(payload) FROM STDIN
+SQL
+  jq -c '{extra:(.extra // {})}' \
+    /home/ubuntu/backups/kiro-native-high-cache-20260714-000824/database/account-1910.json
+  cat <<'SQL'
+\.
+DO $rollback$
+DECLARE
+  rollback_extra jsonb;
+  affected integer;
+BEGIN
+  SELECT payload->'extra'
+  INTO STRICT rollback_extra
+  FROM rollback_account_extra;
+
+  UPDATE accounts
+  SET extra = COALESCE(rollback_extra, '{}'::jsonb),
+      updated_at = NOW()
+  WHERE id = 1910
+    AND deleted_at IS NULL
+    AND status = 'active'
+    AND schedulable = FALSE
+    AND COALESCE(extra, '{}'::jsonb) =
+      '{"cache_ttl_override_enabled": false}'::jsonb;
+
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  IF affected <> 1 THEN
+    RAISE EXCEPTION 'account 1910 Extra 回滚目标不唯一，已回滚事务';
+  END IF;
+
+  INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+  VALUES ('account_changed', 1910, NULL, NULL);
+END
+$rollback$;
+COMMIT;
+SQL
+} | docker exec -i sub2api-postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+### 回滚后核验
+
+```bash
+docker inspect kiro-go-pr131 --format \
+  '{{.Config.Image}}|{{.State.Status}}|{{.State.Health.Status}}|{{.State.StartedAt}}'
+docker inspect sub2api --format \
+  '{{.Config.Image}}|{{.Image}}|{{.State.Status}}|{{.State.Health.Status}}|{{.State.StartedAt}}'
+
+curl -fsS http://127.0.0.1:8321/health
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1/health
+
+docker exec sub2api getent hosts kiro-go-pr131
+docker exec sub2api sh -lc \
+  'wget -q -O - http://kiro-go-pr131:8080/health'
+```
+
+还必须把回滚后的全部容器启动时间与回滚前记录比较，确认只有实际执行回滚的
+目标服务发生变化。
+
 ## account 1910
 
 事务提交时间：
