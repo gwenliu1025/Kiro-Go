@@ -539,6 +539,7 @@ func setupClaudeContractHandler(t *testing.T, accountCount int) *Handler {
 
 	accountPool := accountpool.GetPool()
 	accountPool.Reload()
+	t.Cleanup(accountPool.WaitForPendingStats)
 	return &Handler{
 		pool:        accountPool,
 		promptCache: newPromptCacheTracker(time.Hour),

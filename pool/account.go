@@ -21,6 +21,7 @@ type AccountPool struct {
 	cooldowns     map[string]time.Time       // 账号冷却时间
 	errorCounts   map[string]int             // 连续错误计数
 	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	statsWrites   sync.WaitGroup
 }
 
 var (
@@ -118,7 +119,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		return acc
 	}
 
-		// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
+	// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
@@ -463,8 +464,18 @@ func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 		}
 	}
 	if updated {
-		go config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
+		p.statsWrites.Add(1)
+		go func() {
+			defer p.statsWrites.Done()
+			_ = config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
+		}()
 	}
+}
+
+// WaitForPendingStats 等待已经排队的账号统计写入完成。
+// 调用方必须确保等待期间不会再提交新的 UpdateStats。
+func (p *AccountPool) WaitForPendingStats() {
+	p.statsWrites.Wait()
 }
 
 // GetAllAccounts 获取所有账号副本
