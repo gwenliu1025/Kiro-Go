@@ -12,7 +12,7 @@
   构建并只重建 `kiro-go-pr131`。
 - Kiro-Go 容器监听、Docker 内网和宿主机回环端口已统一为 `8321`。
 - Sub2API 已以提交
-  `1c0f22a8c01588f7aa9a35a4aed48ac65bce4098`
+  `06a25c999c3d0cde157d30cde694fba2960e6d10`
   构建为应用版本 `0.1.152`，并只重建 `sub2api`。
 - account `1910` 已原子切换到 `http://kiro-go-pr131:8321`，旧
   Equivalent Cache Extra 已删除，`cache_ttl_override_enabled=false`。
@@ -57,6 +57,10 @@ SHA256=21a70b4928a06d8f6a7ded10a7f8d35feb70268af0abda714a995f866c5cb361
 
 sub2api-1c0f22a8.tar.gz
 SHA256=4f4406e0edf0d193938fda8012be891e631ca8934c168142ac7d95eea153fe27
+
+最终 Sub2API 候选源码：
+/home/ubuntu/staging/kiro-native-high-cache-20260714/sub2api-build-06a25c99-20260714-023000z/source.tar.gz
+SHA256=8ac72157e7649abef3676f52b4bf0d561cea6a743dbc4c8bf8df960d918b74c9
 ```
 
 ## Kiro-Go 部署
@@ -114,10 +118,11 @@ Docker DNS kiro-go-pr131 -> 172.18.0.13
 
 ```text
 ghcr.io/gwenliu1025/sub2api:0.1.152
-本机镜像 ID=sha256:af52620f4dc4b293436d79e687520791198915f16e8b8826dcdb5a990f1cca9b
+本机镜像 ID=sha256:015e79c653d710174b5e6bc0d8618a982fc28c8af0698d196d22ab4869148720
 version=0.1.152
-revision=1c0f22a8c01588f7aa9a35a4aed48ac65bce4098
-created=2026-07-14T00:57:07Z
+revision=06a25c999c3d0cde157d30cde694fba2960e6d10
+created=2026-07-14T02:32:04Z
+image_created=2026-07-14T02:32:55.751765136Z
 ```
 
 该镜像是毕业机本地候选。远端 GHCR 同标签仍是此前正式发布资产：
@@ -134,6 +139,9 @@ sha256:8f7f1cb6874da8a1aa28095d3b66b14e80aa89cab34b011605f4d001787e0a0c
 ```text
 local/sub2api:rollback-0.1.152-ca7eaa4-20260714
 sha256:8f7f1cb6874da8a1aa28095d3b66b14e80aa89cab34b011605f4d001787e0a0c
+
+local/sub2api:rollback-0.1.152-1c0f22a-20260714-022741z
+sha256:af52620f4dc4b293436d79e687520791198915f16e8b8826dcdb5a990f1cca9b
 ```
 
 当前部署前镜像继续保留：
@@ -146,10 +154,10 @@ sha256:7dca5936fc15e8bf26bd043193e7fadfa4e91c39d179debf313e3755ff7f2240
 最终状态：
 
 ```text
-started=2026-07-14T01:20:22.651655106Z
+started=2026-07-14T02:34:10.443306229Z
 status=running
 health=healthy
-image_id=sha256:af52620f4dc4b293436d79e687520791198915f16e8b8826dcdb5a990f1cca9b
+image_id=sha256:015e79c653d710174b5e6bc0d8618a982fc28c8af0698d196d22ab4869148720
 ```
 
 健康验证：
@@ -159,6 +167,7 @@ http://127.0.0.1:8080/health -> 200
 http://127.0.0.1:8080/healthz -> 200
 http://127.0.0.1/health -> 200
 updater socket /v1/health -> 200
+updater socket /v1/status -> 200
 ```
 
 更新代理的状态缓存仍显示旧 `0.1.149`。这是手工候选 Compose 切换的已知
@@ -265,9 +274,23 @@ go build ./cmd/server
 go build -ldflags='-s -w -X main.Version=0.1.152' -trimpath -o bin/server ./cmd/server
 ```
 
-Sub2API 的 `go test -race ./...` 尚未在 Linux 毕业机执行。本次部署、普通全量、
-unit 标签全量和聚焦回归不能替代 race 证据；该项继续作为生产变更前需要补齐
-或书面接受的验证项。
+Sub2API 最终 race 工作副本：
+
+```text
+/home/ubuntu/staging/kiro-native-high-cache-20260714/sub2api-race-fix-20260714-015824z
+```
+
+其 13 个变更文件与提交 `06a25c99` 的最终构建 staging 逐文件一致。Linux
+毕业机验证结果：
+
+```text
+定向 service race：exit=0，DATA RACE=0，FAIL=0
+普通全量 race：exit=0，DATA RACE=0，FAIL=0
+unit 标签全量 race：exit=0，DATA RACE=0，FAIL=0
+```
+
+5 个已退出的 race 诊断容器已删除，日志和状态摘要保留在最终 Sub2API 构建
+staging；运行中的服务未受影响。
 
 Kiro-Go staging 已通过：
 
@@ -330,7 +353,7 @@ Kiro-Go apiKeys=1
 1. 获得用户对生产机备份、Kiro-Go、account `1910` 和 Sub2API 定向切换的
    明确授权；
 2. 重新归档并发布与提交
-   `1c0f22a8c01588f7aa9a35a4aed48ac65bce4098`
+   `06a25c999c3d0cde157d30cde694fba2960e6d10`
    一致的 `0.1.152` Release、二进制、checksums 和 GHCR 镜像；
 3. 在生产变更前再次完整备份；
 4. 只重建 Kiro-Go 和 Sub2API；
