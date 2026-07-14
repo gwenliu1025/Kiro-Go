@@ -6,7 +6,12 @@ import (
 	"math"
 )
 
-const maxClaudeUsageCandidates = 64
+const (
+	maxClaudeUsageCandidates      = 64
+	firstRoundReadJitterThreshold = -0.60
+	minClaudeReadCreateRatio      = 2.0
+	maxClaudeReadCreateRatio      = 5.0
+)
 
 type claudeUsageFeatures struct {
 	Phase        promptCachePhase
@@ -65,9 +70,6 @@ func stableClaudeUsageJitter(taskKey, requestFingerprint [32]byte) float64 {
 
 func claudeUsageTargetsForFeatures(features claudeUsageFeatures) claudeUsageTargets {
 	reuseRatio := clampFloat(features.ReuseRatio, 0, 1)
-	growthRatio := clampFloat(features.GrowthRatio, 0, 1)
-	ageRatio := clampFloat(features.AgeRatio, 0, 1)
-	roundFactor := clampFloat(features.RoundFactor, 0, 1)
 	sizeFactor := clampFloat(features.SizeFactor, 0, 1)
 	toolRatio := clampFloat(features.ToolRatio, 0, 1)
 	stableJitter := clampFloat(features.StableJitter, -1, 1)
@@ -80,8 +82,7 @@ func claudeUsageTargetsForFeatures(features claudeUsageFeatures) claudeUsageTarg
 	inputShare := clampFloat(inputRaw, 0.01, 0.05)
 	cacheTotal := 1 - inputShare
 
-	if features.Phase == promptCachePhaseFirst ||
-		features.Phase == promptCachePhaseRebuild {
+	if !shouldAllocateClaudeCacheRead(features) {
 		return claudeUsageTargets{
 			InputShare:  inputShare,
 			ReadShare:   0,
@@ -89,21 +90,28 @@ func claudeUsageTargetsForFeatures(features claudeUsageFeatures) claudeUsageTarg
 		}
 	}
 
-	createRaw := 0.06 +
-		0.28*math.Sqrt(growthRatio) +
-		0.025*ageRatio +
-		0.015*toolRatio -
-		0.010*roundFactor +
-		0.008*stableJitter
-	createMin := math.Max(0.08, cacheTotal-0.90)
-	createMax := math.Min(0.20, cacheTotal-0.78)
-	createShare := clampFloat(createRaw, createMin, createMax)
+	ratio := claudeReadCreateRatioForFeatures(features)
+	createShare := cacheTotal / (1 + ratio)
 
 	return claudeUsageTargets{
 		InputShare:  inputShare,
 		ReadShare:   cacheTotal - createShare,
 		CreateShare: createShare,
 	}
+}
+
+func shouldAllocateClaudeCacheRead(features claudeUsageFeatures) bool {
+	return features.Phase == promptCachePhaseContinue ||
+		clampFloat(features.StableJitter, -1, 1) >= firstRoundReadJitterThreshold
+}
+
+func claudeReadCreateRatioForFeatures(features claudeUsageFeatures) float64 {
+	ratioRaw := 2.40 +
+		0.95*clampFloat(features.SizeFactor, 0, 1) +
+		0.25*clampFloat(features.ReuseRatio, 0, 1) -
+		0.15*clampFloat(features.GrowthRatio, 0, 1) +
+		0.35*clampFloat(features.StableJitter, -1, 1)
+	return clampFloat(ratioRaw, minClaudeReadCreateRatio, maxClaudeReadCreateRatio)
 }
 
 func allocateClaudeUsage(
@@ -255,8 +263,12 @@ func validClaudeUsageTarget(target claudeUsageTargets) bool {
 	if target.ReadShare == 0 {
 		return target.CreateShare == cacheRate
 	}
-	return target.ReadShare >= 0.78 && target.ReadShare <= 0.90 &&
-		target.CreateShare >= 0.08 && target.CreateShare <= 0.20
+	if target.CreateShare <= 0 {
+		return false
+	}
+	ratio := target.ReadShare / target.CreateShare
+	return ratio >= minClaudeReadCreateRatio &&
+		ratio <= maxClaudeReadCreateRatio
 }
 
 func validAllocatedClaudeUsage(
@@ -297,9 +309,16 @@ func validAllocatedClaudeUsage(
 		if usage.CacheReadInputTokens != 0 {
 			return false
 		}
-	} else if readShare < 0.78 || readShare > 0.90 ||
-		createShare < 0.08 || createShare > 0.20 {
-		return false
+	} else {
+		if usage.CacheCreationInputTokens <= 0 {
+			return false
+		}
+		ratio := float64(usage.CacheReadInputTokens) /
+			float64(usage.CacheCreationInputTokens)
+		if ratio < minClaudeReadCreateRatio ||
+			ratio > maxClaudeReadCreateRatio {
+			return false
+		}
 	}
 	return claudeUsageCostConserved(rawInputTokens, usage)
 }

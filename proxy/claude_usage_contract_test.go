@@ -35,11 +35,15 @@ func TestClaudeNonStreamReturnsCompleteCacheUsageWithoutCacheControl(t *testing.
 
 	usage, rawUsage := decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
 	assertCompleteClaudeUsageFields(t, rawUsage)
-	if usage.CacheReadInputTokens != 0 {
-		t.Fatalf("首轮不得包含缓存读取：%+v", usage)
-	}
 	if usage.CacheCreationInputTokens <= 0 {
 		t.Fatalf("无 cache_control 的首轮也应生成缓存创建：%+v", usage)
+	}
+	if usage.CacheReadInputTokens > 0 {
+		ratio := float64(usage.CacheReadInputTokens) /
+			float64(usage.CacheCreationInputTokens)
+		if ratio < minClaudeReadCreateRatio || ratio > maxClaudeReadCreateRatio {
+			t.Fatalf("首轮读取/创建倍数越界：%.6f usage=%+v", ratio, usage)
+		}
 	}
 	if usage.CacheCreationInputTokens !=
 		usage.CacheCreation.Ephemeral5mInputTokens+
@@ -49,15 +53,19 @@ func TestClaudeNonStreamReturnsCompleteCacheUsageWithoutCacheControl(t *testing.
 }
 
 func TestClaudeStreamFinalDeltaMatchesNonStreamUsage(t *testing.T) {
-	handler := setupClaudeContractHandler(t, 1)
+	nonStreamHandler := setupClaudeContractHandler(t, 1)
+	streamHandler := &Handler{
+		pool:        nonStreamHandler.pool,
+		promptCache: newPromptCacheTracker(time.Hour),
+	}
 	upstream := newClaudeUsageUpstream(t, "一致响应", 10_000)
 	defer upstream.Close()
 	defer swapKiroEndpointsForTest(t, upstream)()
 
-	nonStream := performClaudeContractRequest(t, handler, false, "同一请求")
+	nonStream := performClaudeContractRequest(t, nonStreamHandler, false, "同一请求")
 	want, _ := decodeClaudeNonStreamUsage(t, nonStream.Body.Bytes())
 
-	stream := performClaudeContractRequest(t, handler, true, "同一请求")
+	stream := performClaudeContractRequest(t, streamHandler, true, "同一请求")
 	if stream.Code != http.StatusOK {
 		t.Fatalf("流式请求失败：status=%d body=%s", stream.Code, stream.Body.String())
 	}

@@ -7,19 +7,38 @@ import (
 	"testing"
 )
 
-func TestClaudeUsageTargetsFirstRoundHasCreationOnly(t *testing.T) {
+func TestClaudeUsageTargetsPromotesMostFirstRoundsToRead(t *testing.T) {
+	var reads int
+	const samples = 5_000
+	for i := 0; i < samples; i++ {
+		features := representativeClaudeUsageFeatures(i)
+		features.Phase = promptCachePhaseFirst
+		target := claudeUsageTargetsForFeatures(features)
+		if target.ReadShare > 0 {
+			reads++
+		}
+	}
+
+	rate := float64(reads) / samples
+	if rate < 0.78 || rate > 0.82 {
+		t.Fatalf("首轮读取覆盖率应接近 80%%，得到 %.2f%%", rate*100)
+	}
+}
+
+func TestClaudeUsageTargetsKeepsMinorityFirstRoundsCreationOnly(t *testing.T) {
 	target := claudeUsageTargetsForFeatures(claudeUsageFeatures{
-		Phase:       promptCachePhaseFirst,
-		GrowthRatio: 1,
-		SizeFactor:  0.7,
-		ToolRatio:   0.1,
+		Phase:        promptCachePhaseFirst,
+		GrowthRatio:  1,
+		SizeFactor:   0.7,
+		ToolRatio:    0.1,
+		StableJitter: -0.9,
 	})
 
 	if target.ReadShare != 0 {
-		t.Fatalf("首轮不得包含缓存读取，得到 %.6f", target.ReadShare)
+		t.Fatalf("低门禁首轮不得包含缓存读取，得到 %.6f", target.ReadShare)
 	}
 	if target.CreateShare <= 0 {
-		t.Fatalf("首轮应以缓存创建为主")
+		t.Fatalf("低门禁首轮应以缓存创建为主")
 	}
 	assertTargetShares(t, target)
 }
@@ -70,40 +89,23 @@ func TestClaudeUsageTargetsReuseRaisesReadShare(t *testing.T) {
 	}
 }
 
-func TestClaudeUsageTargetsRoundAgeToolAndJitterAffectResult(t *testing.T) {
+func TestClaudeUsageTargetsJitterAffectsResult(t *testing.T) {
 	baseFeatures := claudeUsageFeatures{
 		Phase:        promptCachePhaseContinue,
 		ReuseRatio:   0.75,
 		GrowthRatio:  0.03,
-		AgeRatio:     0.2,
-		RoundFactor:  0.2,
 		SizeFactor:   0.7,
-		ToolRatio:    0.1,
 		StableJitter: 0,
 	}
 	base := claudeUsageTargetsForFeatures(baseFeatures)
 
-	cases := map[string]claudeUsageFeatures{}
-	round := baseFeatures
-	round.RoundFactor = 0.8
-	cases["轮次"] = round
-	age := baseFeatures
-	age.AgeRatio = 0.8
-	cases["年龄"] = age
-	tool := baseFeatures
-	tool.ToolRatio = 0.35
-	cases["工具"] = tool
 	jitter := baseFeatures
 	jitter.StableJitter = 0.8
-	cases["微扰"] = jitter
-
-	for name, features := range cases {
-		got := claudeUsageTargetsForFeatures(features)
-		if got == base {
-			t.Fatalf("%s 特征变化后目标比例不应完全相同", name)
-		}
-		assertTargetShares(t, got)
+	got := claudeUsageTargetsForFeatures(jitter)
+	if got == base {
+		t.Fatalf("稳定微扰变化后目标比例不应完全相同")
 	}
+	assertTargetShares(t, got)
 }
 
 func TestClaudeUsageTargetsProduceDiverseBuckets(t *testing.T) {
@@ -130,22 +132,65 @@ func TestClaudeUsageTargetsDoNotPileUpAtBounds(t *testing.T) {
 	const samples = 5_000
 	for i := 0; i < samples; i++ {
 		target := claudeUsageTargetsForFeatures(representativeClaudeUsageFeatures(i))
-		cacheTotal := 1 - target.InputShare
-		createMin := math.Max(0.08, cacheTotal-0.90)
-		createMax := math.Min(0.20, cacheTotal-0.78)
-		if math.Abs(target.CreateShare-createMin) < 1e-12 {
+		ratio := target.ReadShare / target.CreateShare
+		if math.Abs(ratio-minClaudeReadCreateRatio) < 1e-12 {
 			atMin++
 		}
-		if math.Abs(target.CreateShare-createMax) < 1e-12 {
+		if math.Abs(ratio-maxClaudeReadCreateRatio) < 1e-12 {
 			atMax++
 		}
 	}
 
 	if float64(atMin)/samples > 0.30 {
-		t.Fatalf("创建下限命中率超过 30%%：%.2f%%", float64(atMin)*100/samples)
+		t.Fatalf("读取倍数下限命中率超过 30%%：%.2f%%", float64(atMin)*100/samples)
 	}
 	if float64(atMax)/samples > 0.30 {
-		t.Fatalf("创建上限命中率超过 30%%：%.2f%%", float64(atMax)*100/samples)
+		t.Fatalf("读取倍数上限命中率超过 30%%：%.2f%%", float64(atMax)*100/samples)
+	}
+}
+
+func TestClaudeUsageTargetsKeepReadCreateRatioNearThree(t *testing.T) {
+	var sum float64
+	const samples = 5_000
+	buckets := make(map[string]struct{})
+	for i := 0; i < samples; i++ {
+		features := representativeClaudeUsageFeatures(i)
+		features.Phase = promptCachePhaseContinue
+		target := claudeUsageTargetsForFeatures(features)
+		ratio := target.ReadShare / target.CreateShare
+		if ratio < 2 || ratio > 5 {
+			t.Fatalf("目标倍数越界：%.6f", ratio)
+		}
+		sum += ratio
+		buckets[fmt.Sprintf("%.2f", ratio)] = struct{}{}
+	}
+
+	average := sum / samples
+	if average < 2.8 || average > 3.2 {
+		t.Fatalf("平均目标倍数应接近 3，得到 %.6f", average)
+	}
+	if len(buckets) < 100 {
+		t.Fatalf("目标倍数过于统一，仅有 %d 个 0.01 分桶", len(buckets))
+	}
+}
+
+func TestClaudeUsageTargetsLargerInputReadsMore(t *testing.T) {
+	base := claudeUsageFeatures{
+		Phase:        promptCachePhaseContinue,
+		ReuseRatio:   0.6,
+		GrowthRatio:  0.2,
+		StableJitter: 0.1,
+	}
+	small := base
+	small.SizeFactor = 0.2
+	large := base
+	large.SizeFactor = 0.9
+
+	smallTarget := claudeUsageTargetsForFeatures(small)
+	largeTarget := claudeUsageTargetsForFeatures(large)
+	if largeTarget.ReadShare/largeTarget.CreateShare <=
+		smallTarget.ReadShare/smallTarget.CreateShare {
+		t.Fatalf("大输入的读取倍数应更高")
 	}
 }
 
@@ -165,6 +210,81 @@ func TestAllocateClaudeUsageConservesOneHourCost(t *testing.T) {
 		t.Fatalf("1 小时目标应存在合法整数解")
 	}
 	assertClaudeUsageConserved(t, 10_000, usage)
+}
+
+func TestAllocateClaudeUsageKeepsActualReadCreateRatioBounded(t *testing.T) {
+	var ratioSum float64
+	var ratioCount int
+	for _, ttl := range []promptCacheTTL{promptCacheTTL5m, promptCacheTTL1h} {
+		for rawInput := 100; rawInput <= 100_000; rawInput += 997 {
+			target := claudeUsageTargetsForFeatures(claudeUsageFeatures{
+				Phase:        promptCachePhaseContinue,
+				ReuseRatio:   0.95,
+				GrowthRatio:  0.0001,
+				RoundFactor:  1,
+				SizeFactor:   math.Log2(1+float64(rawInput)) / 20,
+				StableJitter: -1,
+			})
+			usage, ok := allocateClaudeUsage(rawInput, 10, ttl, target)
+			if !ok {
+				t.Fatalf("代表性输入必须存在整数解：ttl=%v input=%d", ttl, rawInput)
+			}
+			ratio := float64(usage.CacheReadInputTokens) /
+				float64(usage.CacheCreationInputTokens)
+			if ratio < 2 || ratio > 5 {
+				t.Fatalf(
+					"整数倍数越界：ttl=%v input=%d ratio=%.6f",
+					ttl,
+					rawInput,
+					ratio,
+				)
+			}
+			ratioSum += ratio
+			ratioCount++
+		}
+	}
+
+	average := ratioSum / float64(ratioCount)
+	if average < 2.8 || average > 3.2 {
+		t.Fatalf("整数读取/创建平均倍数应接近 3，得到 %.6f", average)
+	}
+}
+
+func TestAllocateClaudeUsagePreservesFirstAndRebuildReadCoverage(t *testing.T) {
+	for _, phase := range []promptCachePhase{
+		promptCachePhaseFirst,
+		promptCachePhaseRebuild,
+	} {
+		var reads int
+		const samples = 5_000
+		for i := 0; i < samples; i++ {
+			features := representativeClaudeUsageFeatures(i)
+			features.Phase = phase
+			target := claudeUsageTargetsForFeatures(features)
+			ttl := promptCacheTTL5m
+			if i%5 != 0 {
+				ttl = promptCacheTTL1h
+			}
+			usage, ok := allocateClaudeUsage(10_000+i%1_000, 10, ttl, target)
+			if !ok {
+				t.Fatalf("门禁样本必须存在整数解：phase=%v index=%d", phase, i)
+			}
+			if target.ReadShare > 0 {
+				reads++
+				if usage.CacheReadInputTokens <= 0 ||
+					usage.CacheCreationInputTokens <= 0 {
+					t.Fatalf("通过门禁后必须同时读取和创建：phase=%v index=%d", phase, i)
+				}
+			} else if usage.CacheReadInputTokens != 0 {
+				t.Fatalf("未通过门禁时不得读取：phase=%v index=%d", phase, i)
+			}
+		}
+
+		rate := float64(reads) / samples
+		if rate < 0.78 || rate > 0.82 {
+			t.Fatalf("整数分配读取覆盖率应接近 80%%：phase=%v rate=%.2f%%", phase, rate*100)
+		}
+	}
 }
 
 func TestAllocateClaudeUsageUsesSingleTTL(t *testing.T) {
@@ -200,20 +320,37 @@ func TestAllocateClaudeUsageKeepsOutputTokens(t *testing.T) {
 }
 
 func TestAllocateClaudeUsageRespectsPhaseBounds(t *testing.T) {
-	firstTarget := claudeUsageTargetsForFeatures(claudeUsageFeatures{
-		Phase:       promptCachePhaseFirst,
-		GrowthRatio: 1,
-		SizeFactor:  0.8,
-		ToolRatio:   0.1,
+	coldFirstTarget := claudeUsageTargetsForFeatures(claudeUsageFeatures{
+		Phase:        promptCachePhaseFirst,
+		GrowthRatio:  1,
+		SizeFactor:   0.8,
+		ToolRatio:    0.1,
+		StableJitter: -0.9,
 	})
-	first, ok := allocateClaudeUsage(20_000, 100, promptCacheTTL1h, firstTarget)
+	coldFirst, ok := allocateClaudeUsage(20_000, 100, promptCacheTTL1h, coldFirstTarget)
 	if !ok {
-		t.Fatalf("首轮分配失败")
+		t.Fatalf("低门禁首轮分配失败")
 	}
-	if first.CacheReadInputTokens != 0 {
-		t.Fatalf("首轮不得读取缓存")
+	if coldFirst.CacheReadInputTokens != 0 {
+		t.Fatalf("低门禁首轮不得读取缓存")
 	}
-	assertUsageRatios(t, first, false)
+	assertUsageRatios(t, coldFirst, false)
+
+	warmFirstTarget := claudeUsageTargetsForFeatures(claudeUsageFeatures{
+		Phase:        promptCachePhaseFirst,
+		GrowthRatio:  1,
+		SizeFactor:   0.8,
+		ToolRatio:    0.1,
+		StableJitter: 0,
+	})
+	warmFirst, ok := allocateClaudeUsage(20_000, 100, promptCacheTTL1h, warmFirstTarget)
+	if !ok {
+		t.Fatalf("通过门禁首轮分配失败")
+	}
+	if warmFirst.CacheReadInputTokens == 0 || warmFirst.CacheCreationInputTokens == 0 {
+		t.Fatalf("通过门禁首轮应同时包含读取和创建")
+	}
+	assertUsageRatios(t, warmFirst, true)
 
 	continued, ok := allocateClaudeUsage(20_000, 100, promptCacheTTL1h, continuationTarget())
 	if !ok {
@@ -372,7 +509,7 @@ func assertClaudeUsageConserved(t *testing.T, rawInput int, usage ClaudeUsage) {
 	}
 }
 
-func assertUsageRatios(t *testing.T, usage ClaudeUsage, continuation bool) {
+func assertUsageRatios(t *testing.T, usage ClaudeUsage, expectRead bool) {
 	t.Helper()
 	total := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
 	if total <= 0 {
@@ -388,12 +525,11 @@ func assertUsageRatios(t *testing.T, usage ClaudeUsage, continuation bool) {
 	if inputShare < 0.01 || inputShare > 0.05 {
 		t.Fatalf("普通输入比例越界：%.6f", inputShare)
 	}
-	if continuation {
-		if readShare < 0.78 || readShare > 0.90 {
-			t.Fatalf("续轮读取比例越界：%.6f", readShare)
-		}
-		if createShare < 0.08 || createShare > 0.20 {
-			t.Fatalf("续轮创建比例越界：%.6f", createShare)
+	if expectRead {
+		ratio := float64(usage.CacheReadInputTokens) /
+			float64(usage.CacheCreationInputTokens)
+		if ratio < minClaudeReadCreateRatio || ratio > maxClaudeReadCreateRatio {
+			t.Fatalf("读取/创建倍数越界：%.6f", ratio)
 		}
 	}
 }
