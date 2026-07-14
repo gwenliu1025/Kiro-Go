@@ -230,8 +230,67 @@ func TestClaudeContextUsageCommitsCacheStateWithoutExplicitTokenUsage(t *testing
 			if usage.CacheCreationInputTokens <= 0 {
 				t.Fatalf("最终上下文占比应足以生成高缓存用量：%+v", usage)
 			}
+			if !claudeUsageCostConserved(10_000, usage) {
+				t.Fatalf("1%% 上下文占比应按 10,000 个原始输入 token 守恒：%+v", usage)
+			}
 			if handler.promptCache.taskCount() != 1 {
 				t.Fatalf("最终上下文占比应提交高缓存状态")
+			}
+		})
+	}
+}
+
+func TestClaudeFinalContextUsageOverridesEarlierPositiveValue(t *testing.T) {
+	tests := []struct {
+		name       string
+		stream     bool
+		finalUsage float64
+	}{
+		{name: "同步最终零值", finalUsage: 0},
+		{name: "流式最终零值", stream: true, finalUsage: 0},
+		{name: "同步最终超范围值", finalUsage: 101},
+		{name: "流式最终超范围值", stream: true, finalUsage: 101},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := setupClaudeContractHandler(t, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+					"contextUsagePercentage": 1.0,
+				}))
+				_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+					"content": "最终上下文占比覆盖先前正值",
+				}))
+				_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+					"contextUsagePercentage": tc.finalUsage,
+				}))
+			}))
+			defer upstream.Close()
+			defer swapKiroEndpointsForTest(t, upstream)()
+
+			recorder := performClaudeContractRequest(
+				t,
+				handler,
+				tc.stream,
+				strings.Repeat("最终零值上下文用量", 4096),
+			)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("多次上下文占比请求失败：status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+
+			var usage ClaudeUsage
+			if tc.stream {
+				usage, _ = decodeClaudeFinalSSEUsage(t, recorder.Body.String())
+			} else {
+				usage, _ = decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
+			}
+			if usage.CacheReadInputTokens != 0 || usage.CacheCreationInputTokens != 0 {
+				t.Fatalf("最终无效上下文占比不得沿用先前正值生成缓存：%+v", usage)
+			}
+			if handler.promptCache.taskCount() != 0 {
+				t.Fatalf("最终无效上下文占比不得提交高缓存状态")
 			}
 		})
 	}

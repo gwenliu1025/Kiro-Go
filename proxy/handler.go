@@ -966,7 +966,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
-		var finalInputComplete bool
+		var finalUsageComplete bool
 		var toolUses []KiroToolUse
 		var nextContentIndex int
 		var rawContentBuilder strings.Builder
@@ -1272,15 +1272,15 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				outputTokens = outTok
 			},
 			OnFinalUsage: func(_, _ int) {
-				finalInputComplete = true
+				finalUsageComplete = true
 			},
 			OnCredits: func(c float64) {
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				if pct > 0 {
+				realInputTokens = 0
+				if pct > 0 && pct <= 100 {
 					realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
-					finalInputComplete = true
 				}
 			},
 		}
@@ -1338,7 +1338,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				OutputTokens: outputTokens,
 			},
 		}
-		if finalInputComplete && (payload == nil || !payload.WasTruncated) {
+		if (finalUsageComplete || realInputTokens > 0) &&
+			(payload == nil || !payload.WasTruncated) {
 			prepared = prepareFinalClaudeUsage(
 				inputTokens,
 				outputTokens,
@@ -1559,7 +1560,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
-		var finalInputComplete bool
+		var finalUsageComplete bool
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
@@ -1577,15 +1578,15 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				outputTokens = outTok
 			},
 			OnFinalUsage: func(_, _ int) {
-				finalInputComplete = true
+				finalUsageComplete = true
 			},
 			OnCredits: func(c float64) {
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				if pct > 0 {
+				realInputTokens = 0
+				if pct > 0 && pct <= 100 {
 					realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
-					finalInputComplete = true
 				}
 			},
 		}
@@ -1644,7 +1645,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				OutputTokens: outputTokens,
 			},
 		}
-		if finalInputComplete && (payload == nil || !payload.WasTruncated) {
+		if (finalUsageComplete || realInputTokens > 0) &&
+			(payload == nil || !payload.WasTruncated) {
 			prepared = prepareFinalClaudeUsage(
 				inputTokens,
 				outputTokens,
