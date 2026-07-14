@@ -600,6 +600,152 @@ Kiro-Go apiKeys=1
 解除阻塞需要向毕业机 Kiro-Go 导入一个明确授权的可用上游账户。不得从生产机
 或备用机复制，也不得生成临时凭据仅用于探测。
 
+## 毕业机账户来源盘点
+
+2026-07-14 对毕业机自身的 Kiro-Go 配置和本轮备份执行了只读盘点。只输出
+文件路径、权限和数组数量，没有输出账户、Token、API Key 或完整邮箱：
+
+```text
+/home/ubuntu/kiro-go-pr131/data/config.json
+mode=0600 accounts=0 enabled=0 apiKeys=1
+
+/home/ubuntu/kiro-go-pr131/data/config.json.before-native-high-cache-20260714-0058
+mode=0600 accounts=0 enabled=0 apiKeys=1
+
+/home/ubuntu/backups/kiro-native-high-cache-20260714-000824/kiro/config.json
+mode=0600 accounts=0 enabled=0 apiKeys=1
+```
+
+因此毕业机当前配置、部署前配置和完整回滚备份中都不存在可复用的 Kiro 上游
+账户。真实链路阻塞不是遗漏了某个毕业机本地备份，而是确实缺少外部提供且
+明确授权的账户来源。
+
+## 授权后账户导入路径
+
+Kiro-Go 已核验的首选入口为：
+
+```text
+POST http://127.0.0.1:8321/admin/api/auth/credentials
+```
+
+该接口要求 `refreshToken`，并在持久化前先执行一次真实 Token 刷新。刷新
+失败时返回错误且不写入账户；刷新成功后以 `0600` 保存 `config.json` 并立即
+执行 `pool.Reload()`，不需要重启 Kiro-Go。
+
+不得直接编辑 `config.json`，也不得使用只包含一个临时 `accessToken` 的
+数据绕过刷新校验。获得用户明确授权的凭据文件后，文件必须是如下字段形状的
+JSON 对象：
+
+```text
+refreshToken     必填
+clientId         IAM Identity Center / Builder ID 账户按来源提供
+clientSecret     IAM Identity Center / Builder ID 账户按来源提供
+authMethod       idc 或 social；省略时由接口按字段推断
+provider         可选
+region           可选，默认 us-east-1
+```
+
+以下脚本只接受权限不宽于 `0600`、大小不超过 `64 KiB` 的普通文件。管理密码
+从运行中容器环境或现有 `config.json` 读取到内存；请求体和密码不会进入命令行
+参数，输出只包含 HTTP 状态、成功标志、账户 ID、池账户数和可用账户数。
+**该脚本等待用户提供并明确授权凭据文件后才能执行，本轮没有执行。**
+
+```bash
+set -euo pipefail
+: "${KIRO_CREDENTIAL_FILE:?必须指定已授权的 Kiro 凭据 JSON 文件}"
+
+python3 - "$KIRO_CREDENTIAL_FILE" <<'PY'
+import json
+import os
+import stat
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+credential_path = os.path.realpath(sys.argv[1])
+file_stat = os.stat(credential_path)
+if not stat.S_ISREG(file_stat.st_mode):
+    raise SystemExit("凭据路径不是普通文件")
+if stat.S_IMODE(file_stat.st_mode) & 0o077:
+    raise SystemExit("凭据文件权限必须不宽于 0600")
+if file_stat.st_size > 64 * 1024:
+    raise SystemExit("凭据文件超过 64 KiB")
+
+with open(credential_path, encoding="utf-8") as credential_file:
+    payload = json.load(credential_file)
+if not isinstance(payload, dict) or not payload.get("refreshToken"):
+    raise SystemExit("凭据 JSON 缺少 refreshToken")
+
+container = json.loads(
+    subprocess.check_output(
+        ["docker", "inspect", "kiro-go-pr131"],
+        text=True,
+    )
+)[0]
+admin_password = ""
+for item in container.get("Config", {}).get("Env") or []:
+    if item.startswith("ADMIN_PASSWORD="):
+        admin_password = item.split("=", 1)[1]
+        break
+if not admin_password:
+    with open(
+        "/home/ubuntu/kiro-go-pr131/data/config.json",
+        encoding="utf-8",
+    ) as config_file:
+        admin_password = json.load(config_file).get("password", "")
+if not admin_password:
+    raise SystemExit("未找到 Kiro-Go 管理密码")
+
+base_url = "http://127.0.0.1:8321"
+headers = {
+    "Content-Type": "application/json",
+    "X-Admin-Password": admin_password,
+}
+request = urllib.request.Request(
+    base_url + "/admin/api/auth/credentials",
+    data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+    headers=headers,
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=45) as response:
+        import_status = response.status
+        result = json.load(response)
+except urllib.error.HTTPError as error:
+    print(f"import_http_status={error.code}|success=false")
+    raise SystemExit(1)
+
+account = result.get("account") or {}
+if not result.get("success") or not account.get("id"):
+    print(f"import_http_status={import_status}|success=false")
+    raise SystemExit(1)
+
+status_request = urllib.request.Request(
+    base_url + "/admin/api/status",
+    headers={"X-Admin-Password": admin_password},
+)
+with urllib.request.urlopen(status_request, timeout=15) as response:
+    status = json.load(response)
+
+print(
+    "import_http_status=%d|success=true|account_id=%s|accounts=%s|available=%s"
+    % (
+        import_status,
+        account["id"],
+        status.get("accounts"),
+        status.get("available"),
+    )
+)
+PY
+```
+
+导入成功但 `available=0` 时，仍不能继续真实链路验收，需要先处理账户禁用、
+冷却或额度状态。只有 `accounts>=1` 且 `available>=1` 后，才执行账户
+`/test`、Sub2API 同步与流式请求、TTL、换源、倍率和下游展示验收。管理接口的
+`/accounts/{id}/test` 会产生真实上游模型流量，只能在账户来源和真实探测均已
+明确授权后调用，且不能替代完整的 Sub2API 跨服务验收。
+
 ## 生产门禁
 
 毕业机可执行范围已完成。生产机变更前仍必须：
