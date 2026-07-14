@@ -85,6 +85,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 
 	p := accountpool.GetPool()
 	p.Reload()
+	t.Cleanup(p.WaitForPendingStats)
 	h := &Handler{
 		pool:        p,
 		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
