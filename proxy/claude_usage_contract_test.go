@@ -187,6 +187,56 @@ func TestClaudeMissingFinalUsageDoesNotCommitCacheState(t *testing.T) {
 	}
 }
 
+func TestClaudeContextUsageCommitsCacheStateWithoutExplicitTokenUsage(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream bool
+	}{
+		{name: "同步"},
+		{name: "流式", stream: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := setupClaudeContractHandler(t, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+					"content": "正文只带最终上下文占比",
+				}))
+				_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+					"contextUsagePercentage": 1.0,
+				}))
+			}))
+			defer upstream.Close()
+			defer swapKiroEndpointsForTest(t, upstream)()
+
+			recorder := performClaudeContractRequest(
+				t,
+				handler,
+				tc.stream,
+				strings.Repeat("生产上游上下文用量", 4096),
+			)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("带最终上下文占比的请求失败：status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+
+			var usage ClaudeUsage
+			if tc.stream {
+				usage, _ = decodeClaudeFinalSSEUsage(t, recorder.Body.String())
+			} else {
+				usage, _ = decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
+			}
+			if usage.CacheCreationInputTokens <= 0 {
+				t.Fatalf("最终上下文占比应足以生成高缓存用量：%+v", usage)
+			}
+			if handler.promptCache.taskCount() != 1 {
+				t.Fatalf("最终上下文占比应提交高缓存状态")
+			}
+		})
+	}
+}
+
 func TestClaudeRetryFingerprintDoesNotAdvanceRound(t *testing.T) {
 	handler := setupClaudeContractHandler(t, 1)
 	upstream := newClaudeUsageUpstream(t, "幂等响应", 10_000)
