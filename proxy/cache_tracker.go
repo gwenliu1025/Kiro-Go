@@ -13,7 +13,7 @@ import (
 )
 
 const defaultPromptCacheTTL = 5 * time.Minute
-const promptCacheAlgorithmVersion = "native-high-cache-v2"
+const promptCacheAlgorithmVersion = "native-high-cache-v3"
 const promptCacheShardCount = 32
 const promptCacheRetention = 70 * time.Minute
 
