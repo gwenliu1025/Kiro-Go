@@ -2,7 +2,7 @@
 
 日期：2026-07-16
 
-状态：设计已确认，待规格复核
+状态：设计已确认，取消独立 UAT 验收，迁移服务器后进行真实流量验证
 
 ## 1. 结论
 
@@ -92,7 +92,7 @@ window_hit_rate
   / sum(input_tokens + cache_read_input_tokens + cache_creation_input_tokens)
 ```
 
-UAT 和生产观察窗口均要求累计值位于 95%–96%。
+迁移后的真实生产观察窗口要求累计值位于 95%–96%。
 
 ### 4.3 请求条数比例
 
@@ -321,9 +321,9 @@ Kiro-Go 同步 JSON 和流式最终 `message_delta.usage` 都返回：
 - 不会同时出现 5 分钟和 1 小时创建。
 - 截断请求不生成缓存分配。
 
-### 10.4 UAT 验收
+### 10.4 服务器迁移后的真实流量验证
 
-部署到 UAT 后收集至少 500 条完整成功记录，按 Token 加权计算：
+本次不设置独立 UAT 验收阶段。第一版完成代码测试、构建和部署准备后，待服务器迁移完成，再使用真实生产流量收集完整成功记录，按 Token 加权计算：
 
 ```text
 sum(cache_read_input_tokens)
@@ -331,11 +331,11 @@ sum(cache_read_input_tokens)
 sum(input_tokens + cache_read_input_tokens + cache_creation_input_tokens)
 ```
 
-结果必须位于 95%–96%；同时单独报告读取请求占比、创建请求占比和 fallback 率。只有这三类数据都正常，才允许进入生产发布。
+结果目标为 95%–96%；同时单独报告读取请求占比、创建请求占比和 fallback 率。若真实流量偏离目标，再基于记录调整 Kiro-Go 参数并发布下一版，不回写或重算历史 usage。
 
 ## 11. 回滚边界
 
 - 算法版本号递增，旧版本可通过镜像回滚。
 - 回滚只需要恢复 Kiro-Go 镜像，不触碰 Sub2API 数据库、Redis 和其他容器。
 - 新旧算法产生的历史 usage 不重新改写，回滚后只影响新请求。
-- UAT 和生产均保留变更前 Kiro-Go 镜像及 Compose 备份。
+- 服务器迁移前和生产切换前均保留变更前 Kiro-Go 镜像及 Compose 备份。
