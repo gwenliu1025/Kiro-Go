@@ -88,12 +88,12 @@ func TestCompleteIamSsoLoginUsesAuthRegionForTokenExchange(t *testing.T) {
 	state := sessions[sessionID].State
 	sessionsMu.RUnlock()
 	callbackURL := fmt.Sprintf("http://127.0.0.1/oauth/callback?code=code-2&state=%s", state)
-	accessToken, refreshToken, _, _, region, _, err := CompleteIamSsoLogin(sessionID, callbackURL)
+	result, err := CompleteIamSsoLogin(sessionID, callbackURL)
 	if err != nil {
 		t.Fatalf("CompleteIamSsoLogin: %v", err)
 	}
-	if accessToken != "access-2" || refreshToken != "refresh-2" || region != "us-east-1" {
-		t.Fatalf("unexpected completion result: access=%q refresh=%q region=%q", accessToken, refreshToken, region)
+	if result.AccessToken != "access-2" || result.RefreshToken != "refresh-2" || result.AuthRegion != "us-east-1" {
+		t.Fatalf("unexpected completion result: %+v", result)
 	}
 }
 
@@ -111,11 +111,50 @@ func TestCompleteIamSsoLoginClearsExpiredSessionSecrets(t *testing.T) {
 	sessions[sessionID] = session
 	sessionsMu.Unlock()
 
-	_, _, _, _, _, _, err := CompleteIamSsoLogin(sessionID, "http://127.0.0.1/oauth/callback")
+	_, err := CompleteIamSsoLogin(sessionID, "http://127.0.0.1/oauth/callback")
 	if err == nil {
 		t.Fatal("expected expired session error")
 	}
 	if session.ClientID != "" || session.ClientSecret != "" || session.CodeVerifier != "" || session.State != "" {
 		t.Fatalf("expired session retained sensitive fields: %+v", session)
+	}
+}
+
+func TestCompleteIamSsoLoginReturnsRoutingMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/client/register":
+			_, _ = w.Write([]byte(`{"clientId":"client-3","clientSecret":"secret-3"}`))
+		case "/token":
+			_, _ = w.Write([]byte(`{"accessToken":"access-3","refreshToken":"refresh-3","expiresIn":3600}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	previous := iamOIDCBaseURL
+	iamOIDCBaseURL = func(string) string { return srv.URL }
+	defer func() { iamOIDCBaseURL = previous }()
+
+	startURL := "https://d-example.awsapps.com/start"
+	sessionID, _, _, err := StartIamSsoLogin(startURL, "us-east-1", "eu-central-1")
+	if err != nil {
+		t.Fatalf("StartIamSsoLogin: %v", err)
+	}
+	sessionsMu.RLock()
+	state := sessions[sessionID].State
+	sessionsMu.RUnlock()
+
+	result, err := CompleteIamSsoLogin(
+		sessionID,
+		fmt.Sprintf("http://127.0.0.1/oauth/callback?code=code-3&state=%s", state),
+	)
+	if err != nil {
+		t.Fatalf("CompleteIamSsoLogin: %v", err)
+	}
+	if result.AuthRegion != "us-east-1" || result.ProfileRegionHint != "eu-central-1" || result.StartURL != startURL {
+		t.Fatalf("unexpected routing metadata: %+v", result)
 	}
 }

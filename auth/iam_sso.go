@@ -29,6 +29,17 @@ type IamSsoSession struct {
 	timer             *time.Timer
 }
 
+type IamSsoResult struct {
+	AccessToken       string
+	RefreshToken      string
+	ClientID          string
+	ClientSecret      string
+	AuthRegion        string
+	ProfileRegionHint string
+	StartURL          string
+	ExpiresIn         int
+}
+
 var (
 	sessions   = make(map[string]*IamSsoSession)
 	sessionsMu sync.RWMutex
@@ -104,45 +115,45 @@ func StartIamSsoLogin(startURL, authRegion, profileRegionHint string) (sessionID
 }
 
 // CompleteIamSsoLogin 完成 IAM SSO 登录
-func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshToken, clientID, clientSecret, region string, expiresIn int, err error) {
+func CompleteIamSsoLogin(sessionID, callbackURL string) (*IamSsoResult, error) {
 	sessionsMu.RLock()
 	session, ok := sessions[sessionID]
 	sessionsMu.RUnlock()
 
 	if !ok {
-		return "", "", "", "", "", 0, fmt.Errorf("会话不存在或已过期")
+		return nil, fmt.Errorf("会话不存在或已过期")
 	}
 
 	if time.Now().After(session.ExpiresAt) {
 		CancelIamSsoLogin(sessionID)
-		return "", "", "", "", "", 0, fmt.Errorf("会话已过期")
+		return nil, fmt.Errorf("会话已过期")
 	}
 
 	// 解析回调 URL
-	parsedUrl, err := url.Parse(callbackUrl)
+	parsedURL, err := url.Parse(callbackURL)
 	if err != nil {
-		return "", "", "", "", "", 0, fmt.Errorf("无效的回调 URL")
+		return nil, fmt.Errorf("无效的回调 URL")
 	}
 
-	code := parsedUrl.Query().Get("code")
-	state := parsedUrl.Query().Get("state")
-	errorParam := parsedUrl.Query().Get("error")
+	code := parsedURL.Query().Get("code")
+	state := parsedURL.Query().Get("state")
+	errorParam := parsedURL.Query().Get("error")
 
 	if errorParam != "" {
-		return "", "", "", "", "", 0, fmt.Errorf("授权失败: %s", errorParam)
+		return nil, fmt.Errorf("授权失败: %s", errorParam)
 	}
 
 	if state != session.State {
-		return "", "", "", "", "", 0, fmt.Errorf("状态不匹配，可能存在安全风险")
+		return nil, fmt.Errorf("状态不匹配，可能存在安全风险")
 	}
 
 	if code == "" {
-		return "", "", "", "", "", 0, fmt.Errorf("未收到授权码")
+		return nil, fmt.Errorf("未收到授权码")
 	}
 
 	// 用 code 换取 token
 	oidcBase := iamOIDCBaseURL(session.AuthRegion)
-	accessToken, refreshToken, expiresIn, err = exchangeToken(
+	accessToken, refreshToken, expiresIn, err := exchangeToken(
 		oidcBase,
 		session.ClientID,
 		session.ClientSecret,
@@ -151,15 +162,22 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 		session.RedirectURI,
 	)
 	if err != nil {
-		return "", "", "", "", "", 0, err
+		return nil, err
 	}
 
-	clientID = session.ClientID
-	clientSecret = session.ClientSecret
-	region = session.AuthRegion
+	result := &IamSsoResult{
+		AccessToken:       accessToken,
+		RefreshToken:      refreshToken,
+		ClientID:          session.ClientID,
+		ClientSecret:      session.ClientSecret,
+		AuthRegion:        session.AuthRegion,
+		ProfileRegionHint: session.ProfileRegionHint,
+		StartURL:          session.StartURL,
+		ExpiresIn:         expiresIn,
+	}
 	CancelIamSsoLogin(sessionID)
 
-	return accessToken, refreshToken, clientID, clientSecret, region, expiresIn, nil
+	return result, nil
 }
 
 func CancelIamSsoLogin(sessionID string) {

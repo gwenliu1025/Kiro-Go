@@ -2323,6 +2323,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiStartIamSso(w, r)
 	case path == "/auth/iam-sso/complete" && r.Method == "POST":
 		h.apiCompleteIamSso(w, r)
+	case path == "/auth/iam-sso/cancel" && r.Method == "POST":
+		h.apiCancelIamSso(w, r)
 	case path == "/auth/builderid/start" && r.Method == "POST":
 		h.apiStartBuilderIdLogin(w, r)
 	case path == "/auth/builderid/poll" && r.Method == "POST":
@@ -2752,24 +2754,41 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		StartUrl string `json:"startUrl"`
-		Region   string `json:"region"`
+type iamSsoStartRequest struct {
+	StartURL      string `json:"startUrl"`
+	AuthRegion    string `json:"authRegion"`
+	ProfileRegion string `json:"profileRegion"`
+	Region        string `json:"region"`
+}
+
+func (req *iamSsoStartRequest) normalize() {
+	req.StartURL = strings.TrimSpace(req.StartURL)
+	req.AuthRegion = strings.TrimSpace(req.AuthRegion)
+	req.ProfileRegion = strings.TrimSpace(req.ProfileRegion)
+	if req.AuthRegion == "" {
+		req.AuthRegion = strings.TrimSpace(req.Region)
 	}
+	if req.AuthRegion == "" {
+		req.AuthRegion = "us-east-1"
+	}
+}
+
+func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
+	var req iamSsoStartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
 	}
 
-	if req.StartUrl == "" {
+	req.normalize()
+	if req.StartURL == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "startUrl is required"})
 		return
 	}
 
-	sessionID, authorizeUrl, expiresIn, err := auth.StartIamSsoLogin(req.StartUrl, req.Region)
+	sessionID, authorizeURL, expiresIn, err := auth.StartIamSsoLogin(req.StartURL, req.AuthRegion, req.ProfileRegion)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -2778,9 +2797,38 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"sessionId":    sessionID,
-		"authorizeUrl": authorizeUrl,
+		"authorizeUrl": authorizeURL,
 		"expiresIn":    expiresIn,
 	})
+}
+
+func (h *Handler) apiCancelIamSso(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.SessionID != "" {
+		auth.CancelIamSsoLogin(req.SessionID)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
+func buildIamSsoAccount(result auth.IamSsoResult) config.Account {
+	return config.Account{
+		ID:                auth.GenerateAccountID(),
+		AccessToken:       result.AccessToken,
+		RefreshToken:      result.RefreshToken,
+		ClientID:          result.ClientID,
+		ClientSecret:      result.ClientSecret,
+		AuthMethod:        "idc",
+		Provider:          "Enterprise",
+		Region:            result.AuthRegion,
+		StartUrl:          result.StartURL,
+		ProfileRegionHint: result.ProfileRegionHint,
+		ExpiresAt:         time.Now().Unix() + int64(result.ExpiresIn),
+		Enabled:           true,
+		MachineId:         config.GenerateMachineId(),
+	}
 }
 
 func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
@@ -2794,7 +2842,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, err := auth.CompleteIamSsoLogin(req.SessionID, req.CallbackUrl)
+	result, err := auth.CompleteIamSsoLogin(req.SessionID, req.CallbackUrl)
 	if err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -2802,22 +2850,10 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
+	email, _, _ := auth.GetUserInfo(result.AccessToken)
 
-	// 创建账号
-	account := config.Account{
-		ID:           auth.GenerateAccountID(),
-		Email:        email,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		AuthMethod:   "idc",
-		Region:       region,
-		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
-		Enabled:      true,
-		MachineId:    config.GenerateMachineId(),
-	}
+	account := buildIamSsoAccount(*result)
+	account.Email = email
 
 	if err := config.AddAccount(account); err != nil {
 		w.WriteHeader(500)
@@ -2826,13 +2862,22 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.pool.Reload()
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
 			"id":    account.ID,
 			"email": account.Email,
 		},
-	})
+	}
+	if info, refreshErr := RefreshAccountInfo(&account); refreshErr != nil {
+		response["warning"] = refreshErr.Error()
+	} else if updateErr := config.UpdateAccountInfo(account.ID, *info); updateErr != nil {
+		response["warning"] = updateErr.Error()
+	} else {
+		response["subscriptionType"] = info.SubscriptionType
+		h.pool.Reload()
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request) {
