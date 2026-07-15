@@ -3904,15 +3904,18 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 
 	// 构建兼容 Kiro Account Manager 的导出格式
 	type ExportCredentials struct {
-		AccessToken  string `json:"accessToken"`
-		CsrfToken    string `json:"csrfToken"`
-		RefreshToken string `json:"refreshToken"`
-		ClientID     string `json:"clientId,omitempty"`
-		ClientSecret string `json:"clientSecret,omitempty"`
-		Region       string `json:"region,omitempty"`
-		ExpiresAt    int64  `json:"expiresAt"`
-		AuthMethod   string `json:"authMethod,omitempty"`
-		Provider     string `json:"provider,omitempty"`
+		AccessToken       string `json:"accessToken"`
+		CsrfToken         string `json:"csrfToken"`
+		RefreshToken      string `json:"refreshToken"`
+		ClientID          string `json:"clientId,omitempty"`
+		ClientSecret      string `json:"clientSecret,omitempty"`
+		Region            string `json:"region,omitempty"`
+		ExpiresAt         int64  `json:"expiresAt"`
+		AuthMethod        string `json:"authMethod,omitempty"`
+		Provider          string `json:"provider,omitempty"`
+		ProfileArn        string `json:"profileArn,omitempty"`
+		ProfileRegionHint string `json:"profileRegionHint,omitempty"`
+		StartURL          string `json:"startUrl,omitempty"`
 	}
 
 	type ExportSubscription struct {
@@ -3928,19 +3931,22 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type ExportAccount struct {
-		ID           string             `json:"id"`
-		Email        string             `json:"email"`
-		Nickname     string             `json:"nickname,omitempty"`
-		Idp          string             `json:"idp"`
-		UserId       string             `json:"userId,omitempty"`
-		MachineId    string             `json:"machineId,omitempty"`
-		Credentials  ExportCredentials  `json:"credentials"`
-		Subscription ExportSubscription `json:"subscription"`
-		Usage        ExportUsage        `json:"usage"`
-		Tags         []string           `json:"tags"`
-		Status       string             `json:"status"`
-		CreatedAt    int64              `json:"createdAt"`
-		LastUsedAt   int64              `json:"lastUsedAt"`
+		ID                string             `json:"id"`
+		Email             string             `json:"email"`
+		Nickname          string             `json:"nickname,omitempty"`
+		Idp               string             `json:"idp"`
+		UserId            string             `json:"userId,omitempty"`
+		MachineId         string             `json:"machineId,omitempty"`
+		ProfileArn        string             `json:"profileArn,omitempty"`
+		ProfileRegionHint string             `json:"profileRegionHint,omitempty"`
+		StartURL          string             `json:"startUrl,omitempty"`
+		Credentials       ExportCredentials  `json:"credentials"`
+		Subscription      ExportSubscription `json:"subscription"`
+		Usage             ExportUsage        `json:"usage"`
+		Tags              []string           `json:"tags"`
+		Status            string             `json:"status"`
+		CreatedAt         int64              `json:"createdAt"`
+		LastUsedAt        int64              `json:"lastUsedAt"`
 	}
 
 	type ExportData struct {
@@ -3954,14 +3960,17 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	exportAccounts := make([]ExportAccount, 0, len(accounts))
 	for _, a := range accounts {
 		// 映射 provider 到 idp
-		idp := a.Provider
-		if idp == "" {
-			if a.AuthMethod == "social" {
-				idp = "Google"
+		provider := strings.TrimSpace(a.Provider)
+		if provider == "" {
+			if strings.EqualFold(a.AuthMethod, "idc") || strings.EqualFold(a.AuthMethod, "external_idp") {
+				provider = "Enterprise"
+			} else if a.AuthMethod == "social" {
+				provider = "Google"
 			} else {
-				idp = "BuilderId"
+				provider = "BuilderId"
 			}
 		}
+		idp := provider
 
 		// 映射 authMethod
 		authMethod := a.AuthMethod
@@ -3970,33 +3979,41 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 映射订阅类型
-		subType := "Free"
+		subType := "Unknown"
 		rawType := strings.ToUpper(a.SubscriptionType)
-		if strings.Contains(rawType, "PRO_PLUS") || strings.Contains(rawType, "PROPLUS") {
+		if strings.Contains(rawType, "POWER") {
+			subType = "POWER"
+		} else if strings.Contains(rawType, "PRO_PLUS") || strings.Contains(rawType, "PROPLUS") {
 			subType = "Pro_Plus"
 		} else if strings.Contains(rawType, "PRO") {
 			subType = "Pro"
-		} else if strings.Contains(rawType, "POWER") {
-			subType = "Pro_Plus"
+		} else if strings.Contains(rawType, "FREE") {
+			subType = "Free"
 		}
 
 		exportAccounts = append(exportAccounts, ExportAccount{
-			ID:        a.ID,
-			Email:     a.Email,
-			Nickname:  a.Nickname,
-			Idp:       idp,
-			UserId:    a.UserId,
-			MachineId: a.MachineId,
+			ID:                a.ID,
+			Email:             a.Email,
+			Nickname:          a.Nickname,
+			Idp:               idp,
+			UserId:            a.UserId,
+			MachineId:         a.MachineId,
+			ProfileArn:        a.ProfileArn,
+			ProfileRegionHint: a.ProfileRegionHint,
+			StartURL:          a.StartUrl,
 			Credentials: ExportCredentials{
-				AccessToken:  a.AccessToken,
-				CsrfToken:    "",
-				RefreshToken: a.RefreshToken,
-				ClientID:     a.ClientID,
-				ClientSecret: a.ClientSecret,
-				Region:       a.Region,
-				ExpiresAt:    a.ExpiresAt * 1000, // 转为毫秒时间戳
-				AuthMethod:   authMethod,
-				Provider:     a.Provider,
+				AccessToken:       a.AccessToken,
+				CsrfToken:         "",
+				RefreshToken:      a.RefreshToken,
+				ClientID:          a.ClientID,
+				ClientSecret:      a.ClientSecret,
+				Region:            a.Region,
+				ExpiresAt:         a.ExpiresAt * 1000,
+				AuthMethod:        authMethod,
+				Provider:          provider,
+				ProfileArn:        a.ProfileArn,
+				ProfileRegionHint: a.ProfileRegionHint,
+				StartURL:          a.StartUrl,
 			},
 			Subscription: ExportSubscription{
 				Type:  subType,
