@@ -7,6 +7,56 @@ import (
 	"testing"
 )
 
+func TestClaudeUsageTargetsAlwaysReadAndHalfCreate(t *testing.T) {
+	var readOnly, readCreate int
+	const samples = 10_000
+	for i := 0; i < samples; i++ {
+		features := representativeClaudeUsageFeatures(i)
+		features.CreateCache = i%2 == 0
+		target := claudeUsageTargetsForFeatures(features)
+		assertTargetHitRate(t, target.ReadShare)
+		if target.CreateShare == 0 {
+			readOnly++
+		} else {
+			readCreate++
+		}
+	}
+	if readOnly != samples/2 || readCreate != samples/2 {
+		t.Fatalf("请求类别分布错误：只读=%d 读写=%d", readOnly, readCreate)
+	}
+}
+
+func TestClaudeUsageRequestClassIsStableAndBalanced(t *testing.T) {
+	var taskKey, requestFingerprint [32]byte
+	taskKey[0] = 7
+	requestFingerprint[0] = 11
+	want := claudeUsageRequestClassFor(taskKey, requestFingerprint)
+	for i := 0; i < 100; i++ {
+		if got := claudeUsageRequestClassFor(taskKey, requestFingerprint); got != want {
+			t.Fatalf("同一请求类别不稳定：第 %d 次=%d，期望=%d", i, got, want)
+		}
+	}
+
+	var createCount int
+	for i := 0; i < 10_000; i++ {
+		requestFingerprint[0] = byte(i)
+		requestFingerprint[1] = byte(i >> 8)
+		if claudeUsageRequestClassFor(taskKey, requestFingerprint) == claudeUsageReadCreate {
+			createCount++
+		}
+	}
+	if createCount < 4_500 || createCount > 5_500 {
+		t.Fatalf("创建类别分布偏离 50%%：%d/10000", createCount)
+	}
+}
+
+func assertTargetHitRate(t *testing.T, hitRate float64) {
+	t.Helper()
+	if hitRate < minClaudeReadHitRate || hitRate > maxClaudeReadHitRate {
+		t.Fatalf("真实读取命中率越界：%.6f", hitRate)
+	}
+}
+
 func TestClaudeUsageTargetsPromotesMostFirstRoundsToRead(t *testing.T) {
 	var reads int
 	const samples = 5_000
