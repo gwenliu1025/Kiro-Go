@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"kiro-go/auth"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +16,18 @@ func TestNormalizeIamSsoStartRequestUsesLegacyRegionAsAuthRegion(t *testing.T) {
 	req.normalize()
 	if req.AuthRegion != "us-east-1" || req.ProfileRegion != "eu-central-1" {
 		t.Fatalf("unexpected normalized request: %+v", req)
+	}
+}
+
+func TestApiStartIamSsoRequiresProfileRegion(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPost, "/auth/iam-sso/start", strings.NewReader(
+		`{"startUrl":"https://d-example.awsapps.com/start","authRegion":"us-east-1"}`,
+	))
+	rec := httptest.NewRecorder()
+	h.apiStartIamSso(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing profile region, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

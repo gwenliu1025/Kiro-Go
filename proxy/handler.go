@@ -2787,6 +2787,11 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "startUrl is required"})
 		return
 	}
+	if req.ProfileRegion == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "profileRegion is required"})
+		return
+	}
 
 	sessionID, authorizeURL, expiresIn, err := auth.StartIamSsoLogin(req.StartURL, req.AuthRegion, req.ProfileRegion)
 	if err != nil {
