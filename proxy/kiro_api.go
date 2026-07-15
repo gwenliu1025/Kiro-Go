@@ -30,6 +30,31 @@ func regionFromProfileArn(profileArn string) string {
 	return strings.TrimSpace(parts[3])
 }
 
+func normalizeCodeWhispererProfileArn(raw string) (string, string, bool) {
+	profileArn := strings.TrimSpace(raw)
+	parts := strings.SplitN(profileArn, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "codewhisperer" {
+		return "", "", false
+	}
+	switch parts[1] {
+	case "aws", "aws-cn", "aws-us-gov":
+	default:
+		return "", "", false
+	}
+	region := strings.TrimSpace(parts[3])
+	accountID := strings.TrimSpace(parts[4])
+	resource := strings.TrimSpace(parts[5])
+	if region == "" || len(accountID) != 12 || !strings.HasPrefix(resource, "profile/") || len(resource) == len("profile/") {
+		return "", "", false
+	}
+	for _, ch := range accountID {
+		if ch < '0' || ch > '9' {
+			return "", "", false
+		}
+	}
+	return profileArn, region, true
+}
+
 // kiroRegion returns the AWS data-plane region for Kiro / Q calls.
 // Prefer profileArn because account.Region is the auth/OIDC region and can
 // differ from the profile's region.
@@ -119,6 +144,7 @@ func kiroProfileRegionCandidates(account *config.Account) []string {
 
 	if account != nil {
 		add(account.Region)
+		add(account.ProfileRegionHint)
 	}
 	if !shouldProbeFallbackRegions(account) {
 		return out
