@@ -17,14 +17,16 @@ import (
 )
 
 type IamSsoSession struct {
-	ClientID     string
-	ClientSecret string
-	CodeVerifier string
-	State        string
-	Region       string
-	StartUrl     string
-	RedirectUri  string
-	ExpiresAt    time.Time
+	ClientID          string
+	ClientSecret      string
+	CodeVerifier      string
+	State             string
+	AuthRegion        string
+	ProfileRegionHint string
+	StartURL          string
+	RedirectURI       string
+	ExpiresAt         time.Time
+	timer             *time.Timer
 }
 
 var (
@@ -40,17 +42,21 @@ var scopes = []string{
 	"codewhisperer:taskassist",
 }
 
+var iamOIDCBaseURL = func(region string) string {
+	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
+}
+
 // StartIamSsoLogin 发起 IAM SSO 登录
-func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, expiresIn int, err error) {
-	if region == "" {
-		region = "us-east-1"
+func StartIamSsoLogin(startURL, authRegion, profileRegionHint string) (sessionID, authorizeURL string, expiresIn int, err error) {
+	if authRegion == "" {
+		authRegion = "us-east-1"
 	}
 
-	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
-	redirectUri := "http://127.0.0.1/oauth/callback"
+	oidcBase := iamOIDCBaseURL(authRegion)
+	redirectURI := "http://127.0.0.1/oauth/callback"
 
 	// 1. 注册 OIDC 客户端
-	clientID, clientSecret, err := registerOIDCClient(oidcBase, startUrl, redirectUri)
+	clientID, clientSecret, err := registerOIDCClient(oidcBase, startURL, redirectURI)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("注册客户端失败: %w", err)
 	}
@@ -64,35 +70,37 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 	params := url.Values{}
 	params.Set("response_type", "code")
 	params.Set("client_id", clientID)
-	params.Set("redirect_uri", redirectUri)
+	params.Set("redirect_uri", redirectURI)
 	params.Set("scopes", joinScopes())
 	params.Set("state", state)
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
 
-	authorizeUrl = fmt.Sprintf("%s/authorize?%s", oidcBase, params.Encode())
+	authorizeURL = fmt.Sprintf("%s/authorize?%s", oidcBase, params.Encode())
 
 	// 4. 保存会话
 	sessionID = uuid.New().String()
 	session := &IamSsoSession{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		CodeVerifier: codeVerifier,
-		State:        state,
-		Region:       region,
-		StartUrl:     startUrl,
-		RedirectUri:  redirectUri,
-		ExpiresAt:    time.Now().Add(10 * time.Minute),
+		ClientID:          clientID,
+		ClientSecret:      clientSecret,
+		CodeVerifier:      codeVerifier,
+		State:             state,
+		AuthRegion:        authRegion,
+		ProfileRegionHint: profileRegionHint,
+		StartURL:          startURL,
+		RedirectURI:       redirectURI,
+		ExpiresAt:         time.Now().Add(10 * time.Minute),
 	}
 
 	sessionsMu.Lock()
 	sessions[sessionID] = session
 	sessionsMu.Unlock()
 
-	// 清理过期会话
-	go cleanupExpiredSessions()
+	session.timer = time.AfterFunc(10*time.Minute, func() {
+		CancelIamSsoLogin(sessionID)
+	})
 
-	return sessionID, authorizeUrl, 600, nil
+	return sessionID, authorizeURL, 600, nil
 }
 
 // CompleteIamSsoLogin 完成 IAM SSO 登录
@@ -106,9 +114,7 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 	}
 
 	if time.Now().After(session.ExpiresAt) {
-		sessionsMu.Lock()
-		delete(sessions, sessionID)
-		sessionsMu.Unlock()
+		CancelIamSsoLogin(sessionID)
 		return "", "", "", "", "", 0, fmt.Errorf("会话已过期")
 	}
 
@@ -135,25 +141,44 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 	}
 
 	// 用 code 换取 token
-	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", session.Region)
+	oidcBase := iamOIDCBaseURL(session.AuthRegion)
 	accessToken, refreshToken, expiresIn, err = exchangeToken(
 		oidcBase,
 		session.ClientID,
 		session.ClientSecret,
 		code,
 		session.CodeVerifier,
-		session.RedirectUri,
+		session.RedirectURI,
 	)
 	if err != nil {
 		return "", "", "", "", "", 0, err
 	}
 
-	// 清理会话
-	sessionsMu.Lock()
-	delete(sessions, sessionID)
-	sessionsMu.Unlock()
+	clientID = session.ClientID
+	clientSecret = session.ClientSecret
+	region = session.AuthRegion
+	CancelIamSsoLogin(sessionID)
 
-	return accessToken, refreshToken, session.ClientID, session.ClientSecret, session.Region, expiresIn, nil
+	return accessToken, refreshToken, clientID, clientSecret, region, expiresIn, nil
+}
+
+func CancelIamSsoLogin(sessionID string) {
+	sessionsMu.Lock()
+	session, ok := sessions[sessionID]
+	if ok {
+		delete(sessions, sessionID)
+	}
+	sessionsMu.Unlock()
+	if !ok {
+		return
+	}
+	if session.timer != nil {
+		session.timer.Stop()
+	}
+	session.ClientID = ""
+	session.ClientSecret = ""
+	session.CodeVerifier = ""
+	session.State = ""
 }
 
 func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clientSecret string, err error) {
@@ -251,15 +276,4 @@ func joinScopes() string {
 		result += s
 	}
 	return result
-}
-
-func cleanupExpiredSessions() {
-	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-	now := time.Now()
-	for id, s := range sessions {
-		if now.After(s.ExpiresAt) {
-			delete(sessions, id)
-		}
-	}
 }
