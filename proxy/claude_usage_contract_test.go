@@ -35,15 +35,9 @@ func TestClaudeNonStreamReturnsCompleteCacheUsageWithoutCacheControl(t *testing.
 
 	usage, rawUsage := decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
 	assertCompleteClaudeUsageFields(t, rawUsage)
-	if usage.CacheCreationInputTokens <= 0 {
-		t.Fatalf("无 cache_control 的首轮也应生成缓存创建：%+v", usage)
-	}
-	if usage.CacheReadInputTokens > 0 {
-		ratio := float64(usage.CacheReadInputTokens) /
-			float64(usage.CacheCreationInputTokens)
-		if ratio < minClaudeReadCreateRatio || ratio > maxClaudeReadCreateRatio {
-			t.Fatalf("首轮读取/创建倍数越界：%.6f usage=%+v", ratio, usage)
-		}
+	assertUsageHitRate(t, usage)
+	if usage.CacheReadInputTokens <= 0 {
+		t.Fatalf("完整请求必须读取缓存：%+v", usage)
 	}
 	if usage.CacheCreationInputTokens !=
 		usage.CacheCreation.Ephemeral5mInputTokens+
@@ -235,9 +229,10 @@ func TestClaudeContextUsageCommitsCacheStateWithoutExplicitTokenUsage(t *testing
 			} else {
 				usage, _ = decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
 			}
-			if usage.CacheCreationInputTokens <= 0 {
-				t.Fatalf("最终上下文占比应足以生成高缓存用量：%+v", usage)
+			if usage.CacheReadInputTokens <= 0 {
+				t.Fatalf("最终上下文占比应足以生成缓存读取用量：%+v", usage)
 			}
+			assertUsageHitRate(t, usage)
 			if !claudeUsageCostConserved(10_000, usage) {
 				t.Fatalf("1%% 上下文占比应按 10,000 个原始输入 token 守恒：%+v", usage)
 			}
