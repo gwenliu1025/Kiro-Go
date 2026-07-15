@@ -60,6 +60,8 @@ func assertTargetHitRate(t *testing.T, hitRate float64) {
 
 测试小、中、大输入以及不同工具占比，要求目标命中率位于 0.95–0.96，且大输入目标不低于小输入。
 
+另外新增稳定性测试：同一个 taskKey 和 requestFingerprint 连续计算 100 次必须得到相同类别；10,000 组不同指纹的创建类别必须接近 50%。
+
 - [ ] **步骤 3：运行测试确认失败。**
 
 ~~~powershell
@@ -188,11 +190,14 @@ git commit -m "调整：将Kiro-Go真实缓存命中率控制在95到96%"
 
 - [ ] **步骤 1：将目标校验改为真实读取命中率。**
 
-validClaudeUsageTarget 必须接受 CreateShare 为 0，并验证：
+validClaudeUsageTarget 必须保留现有的非负值和数值有限性校验，接受 CreateShare 为 0，并验证：
 
 ~~~go
 if target.ReadShare < minClaudeReadHitRate ||
     target.ReadShare > maxClaudeReadHitRate {
+    return false
+}
+if target.InputShare < 0.01 || target.InputShare > 0.05 {
     return false
 }
 if target.CreateShare < 0 ||
@@ -235,11 +240,27 @@ usage.CacheCreationInputTokens ==
 创建目标求解失败时，用同一个 InputShare 重试：
 
 ~~~go
+usage, ok, _ := allocateClaudeUsageWithCandidateCount(
+    rawInputTokens,
+    rawOutputTokens,
+    ttl,
+    target,
+)
+if ok || target.CreateShare <= 0 {
+    return usage, ok
+}
 fallbackTarget := claudeUsageTargets{
     InputShare:  target.InputShare,
-    ReadShare:  1 - target.InputShare,
+    ReadShare:   1 - target.InputShare,
     CreateShare: 0,
 }
+fallbackUsage, fallbackOK, _ := allocateClaudeUsageWithCandidateCount(
+    rawInputTokens,
+    rawOutputTokens,
+    ttl,
+    fallbackTarget,
+)
+return fallbackUsage, fallbackOK
 ~~~
 
 只有只读取也无法整数守恒时才返回原始 usage。
@@ -411,4 +432,3 @@ fallback_count / total_completed_requests
 - 没有引入 Sub2API、数据库、Redis 或 DNS 改动。
 - 新增的 claudeUsageRequestClassFor、CreateCache、minClaudeReadHitRate、maxClaudeReadHitRate 均在任务 2 定义。
 - 计划没有使用 TODO、TBD 或未定义的后续动作。
-
