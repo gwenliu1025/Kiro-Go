@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,10 +59,57 @@ var iamOIDCBaseURL = func(region string) string {
 	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
 }
 
-// StartIamSsoLogin 发起 IAM SSO 登录
-func StartIamSsoLogin(startURL, authRegion, profileRegionHint string) (sessionID, authorizeURL string, expiresIn int, err error) {
+var (
+	awsRegionPattern                = regexp.MustCompile(`^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$`)
+	awsAccessPortalHostPattern      = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+awsapps\.com$`)
+	identityCenterIssuerPathPattern = regexp.MustCompile(`^/ssoins-[A-Za-z0-9-]+/?$`)
+)
+
+func normalizeIamSsoLoginInput(startURL, authRegion, profileRegionHint string) (string, string, string, error) {
+	startURL = strings.TrimSpace(startURL)
+	authRegion = strings.TrimSpace(authRegion)
+	profileRegionHint = strings.TrimSpace(profileRegionHint)
 	if authRegion == "" {
 		authRegion = "us-east-1"
+	}
+
+	parsedURL, err := url.Parse(startURL)
+	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.Opaque != "" {
+		return "", "", "", fmt.Errorf("startUrl must be a supported HTTPS AWS access portal or IAM Identity Center issuer URL")
+	}
+	if parsedURL.User != nil || parsedURL.Port() != "" || parsedURL.RawQuery != "" || parsedURL.ForceQuery || parsedURL.Fragment != "" {
+		return "", "", "", fmt.Errorf("startUrl must not contain user info, a port, query parameters, or a fragment")
+	}
+	if strings.Contains(parsedURL.EscapedPath(), "%") {
+		return "", "", "", fmt.Errorf("startUrl contains an unsupported encoded path")
+	}
+
+	host := strings.ToLower(parsedURL.Hostname())
+	isAccessPortal := awsAccessPortalHostPattern.MatchString(host) && (parsedURL.Path == "/start" || parsedURL.Path == "/start/")
+	isIssuer := host == "identitycenter.amazonaws.com" && identityCenterIssuerPathPattern.MatchString(parsedURL.Path)
+	if !isAccessPortal && !isIssuer {
+		return "", "", "", fmt.Errorf("startUrl must be an AWS access portal URL ending in awsapps.com/start or an IAM Identity Center issuer URL")
+	}
+	if !awsRegionPattern.MatchString(authRegion) {
+		return "", "", "", fmt.Errorf("authRegion must be a valid AWS Region")
+	}
+	if !awsRegionPattern.MatchString(profileRegionHint) {
+		return "", "", "", fmt.Errorf("profileRegion must be a valid AWS Region")
+	}
+
+	return startURL, authRegion, profileRegionHint, nil
+}
+
+func ValidateIamSsoLoginInput(startURL, authRegion, profileRegionHint string) error {
+	_, _, _, err := normalizeIamSsoLoginInput(startURL, authRegion, profileRegionHint)
+	return err
+}
+
+// StartIamSsoLogin 发起 IAM SSO 登录
+func StartIamSsoLogin(startURL, authRegion, profileRegionHint string) (sessionID, authorizeURL string, expiresIn int, err error) {
+	startURL, authRegion, profileRegionHint, err = normalizeIamSsoLoginInput(startURL, authRegion, profileRegionHint)
+	if err != nil {
+		return "", "", 0, err
 	}
 
 	oidcBase := iamOIDCBaseURL(authRegion)

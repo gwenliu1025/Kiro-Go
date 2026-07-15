@@ -52,6 +52,65 @@ func TestStartIamSsoLoginSeparatesAuthAndProfileRegions(t *testing.T) {
 	}
 }
 
+func TestValidateIamSsoLoginInputAcceptsSupportedStartURLs(t *testing.T) {
+	startURLs := []string{
+		"https://d-example.awsapps.com/start",
+		"https://company-name.awsapps.com/start/",
+		"https://identitycenter.amazonaws.com/ssoins-example1234567890",
+	}
+
+	for _, startURL := range startURLs {
+		t.Run(startURL, func(t *testing.T) {
+			if err := ValidateIamSsoLoginInput(startURL, "us-east-1", "eu-central-1"); err != nil {
+				t.Fatalf("ValidateIamSsoLoginInput(%q): %v", startURL, err)
+			}
+		})
+	}
+}
+
+func TestValidateIamSsoLoginInputRejectsUnsupportedStartURLs(t *testing.T) {
+	startURLs := []string{
+		"http://d-example.awsapps.com/start",
+		"https://d-example.awsapps.com.evil.example/start",
+		"https://user@d-example.awsapps.com/start",
+		"https://d-example.awsapps.com:443/start",
+		"https://d-example.awsapps.com/start?region=eu-central-1",
+		"https://d-example.awsapps.com/start#fragment",
+		"https://d-example.awsapps.com/not-start",
+		"https://ssoins-example1234567890.portal.eu-central-1.app.aws",
+		"https://identitycenter.amazonaws.com/not-an-issuer",
+	}
+
+	for _, startURL := range startURLs {
+		t.Run(startURL, func(t *testing.T) {
+			if err := ValidateIamSsoLoginInput(startURL, "us-east-1", "eu-central-1"); err == nil {
+				t.Fatalf("expected unsupported start URL %q to be rejected", startURL)
+			}
+		})
+	}
+}
+
+func TestValidateIamSsoLoginInputRejectsInvalidRegions(t *testing.T) {
+	tests := []struct {
+		name          string
+		authRegion    string
+		profileRegion string
+	}{
+		{name: "auth region is URL", authRegion: "https://oidc.us-east-1.amazonaws.com", profileRegion: "eu-central-1"},
+		{name: "auth region contains path", authRegion: "us-east-1/token", profileRegion: "eu-central-1"},
+		{name: "profile region contains port", authRegion: "us-east-1", profileRegion: "eu-central-1:443"},
+		{name: "profile region is empty", authRegion: "us-east-1", profileRegion: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateIamSsoLoginInput("https://d-example.awsapps.com/start", tt.authRegion, tt.profileRegion); err == nil {
+				t.Fatalf("expected regions auth=%q profile=%q to be rejected", tt.authRegion, tt.profileRegion)
+			}
+		})
+	}
+}
+
 func TestCompleteIamSsoLoginUsesAuthRegionForTokenExchange(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
