@@ -2323,6 +2323,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiStartIamSso(w, r)
 	case path == "/auth/iam-sso/complete" && r.Method == "POST":
 		h.apiCompleteIamSso(w, r)
+	case path == "/auth/iam-sso/cancel" && r.Method == "POST":
+		h.apiCancelIamSso(w, r)
 	case path == "/auth/builderid/start" && r.Method == "POST":
 		h.apiStartBuilderIdLogin(w, r)
 	case path == "/auth/builderid/poll" && r.Method == "POST":
@@ -2752,24 +2754,51 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		StartUrl string `json:"startUrl"`
-		Region   string `json:"region"`
+type iamSsoStartRequest struct {
+	StartURL      string `json:"startUrl"`
+	AuthRegion    string `json:"authRegion"`
+	ProfileRegion string `json:"profileRegion"`
+	Region        string `json:"region"`
+}
+
+func (req *iamSsoStartRequest) normalize() {
+	req.StartURL = strings.TrimSpace(req.StartURL)
+	req.AuthRegion = strings.TrimSpace(req.AuthRegion)
+	req.ProfileRegion = strings.TrimSpace(req.ProfileRegion)
+	if req.AuthRegion == "" {
+		req.AuthRegion = strings.TrimSpace(req.Region)
 	}
+	if req.AuthRegion == "" {
+		req.AuthRegion = "us-east-1"
+	}
+}
+
+func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
+	var req iamSsoStartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
 	}
 
-	if req.StartUrl == "" {
+	req.normalize()
+	if req.StartURL == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "startUrl is required"})
 		return
 	}
+	if req.ProfileRegion == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "profileRegion is required"})
+		return
+	}
+	if err := auth.ValidateIamSsoLoginInput(req.StartURL, req.AuthRegion, req.ProfileRegion); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
 
-	sessionID, authorizeUrl, expiresIn, err := auth.StartIamSsoLogin(req.StartUrl, req.Region)
+	sessionID, authorizeURL, expiresIn, err := auth.StartIamSsoLogin(req.StartURL, req.AuthRegion, req.ProfileRegion)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -2778,9 +2807,38 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"sessionId":    sessionID,
-		"authorizeUrl": authorizeUrl,
+		"authorizeUrl": authorizeURL,
 		"expiresIn":    expiresIn,
 	})
+}
+
+func (h *Handler) apiCancelIamSso(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.SessionID != "" {
+		auth.CancelIamSsoLogin(req.SessionID)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
+func buildIamSsoAccount(result auth.IamSsoResult) config.Account {
+	return config.Account{
+		ID:                auth.GenerateAccountID(),
+		AccessToken:       result.AccessToken,
+		RefreshToken:      result.RefreshToken,
+		ClientID:          result.ClientID,
+		ClientSecret:      result.ClientSecret,
+		AuthMethod:        "idc",
+		Provider:          "Enterprise",
+		Region:            result.AuthRegion,
+		StartUrl:          result.StartURL,
+		ProfileRegionHint: result.ProfileRegionHint,
+		ExpiresAt:         time.Now().Unix() + int64(result.ExpiresIn),
+		Enabled:           true,
+		MachineId:         config.GenerateMachineId(),
+	}
 }
 
 func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
@@ -2794,7 +2852,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, err := auth.CompleteIamSsoLogin(req.SessionID, req.CallbackUrl)
+	result, err := auth.CompleteIamSsoLogin(req.SessionID, req.CallbackUrl)
 	if err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -2802,22 +2860,10 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
+	email, _, _ := auth.GetUserInfo(result.AccessToken)
 
-	// 创建账号
-	account := config.Account{
-		ID:           auth.GenerateAccountID(),
-		Email:        email,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		AuthMethod:   "idc",
-		Region:       region,
-		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
-		Enabled:      true,
-		MachineId:    config.GenerateMachineId(),
-	}
+	account := buildIamSsoAccount(*result)
+	account.Email = email
 
 	if err := config.AddAccount(account); err != nil {
 		w.WriteHeader(500)
@@ -2826,13 +2872,22 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.pool.Reload()
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
 			"id":    account.ID,
 			"email": account.Email,
 		},
-	})
+	}
+	if info, refreshErr := RefreshAccountInfo(&account); refreshErr != nil {
+		response["warning"] = refreshErr.Error()
+	} else if updateErr := config.UpdateAccountInfo(account.ID, *info); updateErr != nil {
+		response["warning"] = updateErr.Error()
+	} else {
+		response["subscriptionType"] = info.SubscriptionType
+		h.pool.Reload()
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request) {
@@ -3123,13 +3178,15 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		AuthMethod   string `json:"authMethod"`
-		Provider     string `json:"provider"`
-		Region       string `json:"region"`
+		AccessToken       string `json:"accessToken"`
+		RefreshToken      string `json:"refreshToken"`
+		ClientID          string `json:"clientId"`
+		ClientSecret      string `json:"clientSecret"`
+		AuthMethod        string `json:"authMethod"`
+		Provider          string `json:"provider"`
+		Region            string `json:"region"`
+		ProfileArn        string `json:"profileArn"`
+		ProfileRegionHint string `json:"profileRegionHint"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3167,6 +3224,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			req.AuthMethod = "social"
 		}
 	}
+	if req.AuthMethod == "idc" && strings.TrimSpace(req.Provider) == "" {
+		req.Provider = "Enterprise"
+	}
 
 	// 用 refreshToken 刷新获取新的 accessToken。导入必须以一次成功的刷新为前提：
 	// 本地缓存里的 accessToken 不携带可信的过期时间，盲猜短 TTL 会让账号在选号时
@@ -3187,25 +3247,35 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	if newRefreshToken != "" {
 		req.RefreshToken = newRefreshToken
 	}
+	profileArn, profileRegion, _ := normalizeCodeWhispererProfileArn(req.ProfileArn)
+	if refreshedArn, refreshedRegion, ok := normalizeCodeWhispererProfileArn(newProfileArn); ok {
+		profileArn = refreshedArn
+		profileRegion = refreshedRegion
+	}
+	profileRegionHint := strings.TrimSpace(req.ProfileRegionHint)
+	if profileRegionHint == "" {
+		profileRegionHint = profileRegion
+	}
 
 	// 获取用户信息
 	email, _, _ := auth.GetUserInfo(accessToken)
 
 	// 创建账号
 	account := config.Account{
-		ID:           auth.GenerateAccountID(),
-		Email:        email,
-		AccessToken:  accessToken,
-		RefreshToken: req.RefreshToken,
-		ClientID:     req.ClientID,
-		ClientSecret: req.ClientSecret,
-		AuthMethod:   req.AuthMethod,
-		Provider:     req.Provider,
-		Region:       req.Region,
-		ExpiresAt:    expiresAt,
-		Enabled:      true,
-		MachineId:    config.GenerateMachineId(),
-		ProfileArn:   newProfileArn,
+		ID:                auth.GenerateAccountID(),
+		Email:             email,
+		AccessToken:       accessToken,
+		RefreshToken:      req.RefreshToken,
+		ClientID:          req.ClientID,
+		ClientSecret:      req.ClientSecret,
+		AuthMethod:        req.AuthMethod,
+		Provider:          req.Provider,
+		Region:            req.Region,
+		ExpiresAt:         expiresAt,
+		Enabled:           true,
+		MachineId:         config.GenerateMachineId(),
+		ProfileArn:        profileArn,
+		ProfileRegionHint: profileRegionHint,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -3844,15 +3914,18 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 
 	// 构建兼容 Kiro Account Manager 的导出格式
 	type ExportCredentials struct {
-		AccessToken  string `json:"accessToken"`
-		CsrfToken    string `json:"csrfToken"`
-		RefreshToken string `json:"refreshToken"`
-		ClientID     string `json:"clientId,omitempty"`
-		ClientSecret string `json:"clientSecret,omitempty"`
-		Region       string `json:"region,omitempty"`
-		ExpiresAt    int64  `json:"expiresAt"`
-		AuthMethod   string `json:"authMethod,omitempty"`
-		Provider     string `json:"provider,omitempty"`
+		AccessToken       string `json:"accessToken"`
+		CsrfToken         string `json:"csrfToken"`
+		RefreshToken      string `json:"refreshToken"`
+		ClientID          string `json:"clientId,omitempty"`
+		ClientSecret      string `json:"clientSecret,omitempty"`
+		Region            string `json:"region,omitempty"`
+		ExpiresAt         int64  `json:"expiresAt"`
+		AuthMethod        string `json:"authMethod,omitempty"`
+		Provider          string `json:"provider,omitempty"`
+		ProfileArn        string `json:"profileArn,omitempty"`
+		ProfileRegionHint string `json:"profileRegionHint,omitempty"`
+		StartURL          string `json:"startUrl,omitempty"`
 	}
 
 	type ExportSubscription struct {
@@ -3868,19 +3941,22 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type ExportAccount struct {
-		ID           string             `json:"id"`
-		Email        string             `json:"email"`
-		Nickname     string             `json:"nickname,omitempty"`
-		Idp          string             `json:"idp"`
-		UserId       string             `json:"userId,omitempty"`
-		MachineId    string             `json:"machineId,omitempty"`
-		Credentials  ExportCredentials  `json:"credentials"`
-		Subscription ExportSubscription `json:"subscription"`
-		Usage        ExportUsage        `json:"usage"`
-		Tags         []string           `json:"tags"`
-		Status       string             `json:"status"`
-		CreatedAt    int64              `json:"createdAt"`
-		LastUsedAt   int64              `json:"lastUsedAt"`
+		ID                string             `json:"id"`
+		Email             string             `json:"email"`
+		Nickname          string             `json:"nickname,omitempty"`
+		Idp               string             `json:"idp"`
+		UserId            string             `json:"userId,omitempty"`
+		MachineId         string             `json:"machineId,omitempty"`
+		ProfileArn        string             `json:"profileArn,omitempty"`
+		ProfileRegionHint string             `json:"profileRegionHint,omitempty"`
+		StartURL          string             `json:"startUrl,omitempty"`
+		Credentials       ExportCredentials  `json:"credentials"`
+		Subscription      ExportSubscription `json:"subscription"`
+		Usage             ExportUsage        `json:"usage"`
+		Tags              []string           `json:"tags"`
+		Status            string             `json:"status"`
+		CreatedAt         int64              `json:"createdAt"`
+		LastUsedAt        int64              `json:"lastUsedAt"`
 	}
 
 	type ExportData struct {
@@ -3894,14 +3970,17 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	exportAccounts := make([]ExportAccount, 0, len(accounts))
 	for _, a := range accounts {
 		// 映射 provider 到 idp
-		idp := a.Provider
-		if idp == "" {
-			if a.AuthMethod == "social" {
-				idp = "Google"
+		provider := strings.TrimSpace(a.Provider)
+		if provider == "" {
+			if strings.EqualFold(a.AuthMethod, "idc") || strings.EqualFold(a.AuthMethod, "external_idp") {
+				provider = "Enterprise"
+			} else if a.AuthMethod == "social" {
+				provider = "Google"
 			} else {
-				idp = "BuilderId"
+				provider = "BuilderId"
 			}
 		}
+		idp := provider
 
 		// 映射 authMethod
 		authMethod := a.AuthMethod
@@ -3910,33 +3989,41 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 映射订阅类型
-		subType := "Free"
+		subType := "Unknown"
 		rawType := strings.ToUpper(a.SubscriptionType)
-		if strings.Contains(rawType, "PRO_PLUS") || strings.Contains(rawType, "PROPLUS") {
+		if strings.Contains(rawType, "POWER") {
+			subType = "POWER"
+		} else if strings.Contains(rawType, "PRO_PLUS") || strings.Contains(rawType, "PROPLUS") {
 			subType = "Pro_Plus"
 		} else if strings.Contains(rawType, "PRO") {
 			subType = "Pro"
-		} else if strings.Contains(rawType, "POWER") {
-			subType = "Pro_Plus"
+		} else if strings.Contains(rawType, "FREE") {
+			subType = "Free"
 		}
 
 		exportAccounts = append(exportAccounts, ExportAccount{
-			ID:        a.ID,
-			Email:     a.Email,
-			Nickname:  a.Nickname,
-			Idp:       idp,
-			UserId:    a.UserId,
-			MachineId: a.MachineId,
+			ID:                a.ID,
+			Email:             a.Email,
+			Nickname:          a.Nickname,
+			Idp:               idp,
+			UserId:            a.UserId,
+			MachineId:         a.MachineId,
+			ProfileArn:        a.ProfileArn,
+			ProfileRegionHint: a.ProfileRegionHint,
+			StartURL:          a.StartUrl,
 			Credentials: ExportCredentials{
-				AccessToken:  a.AccessToken,
-				CsrfToken:    "",
-				RefreshToken: a.RefreshToken,
-				ClientID:     a.ClientID,
-				ClientSecret: a.ClientSecret,
-				Region:       a.Region,
-				ExpiresAt:    a.ExpiresAt * 1000, // 转为毫秒时间戳
-				AuthMethod:   authMethod,
-				Provider:     a.Provider,
+				AccessToken:       a.AccessToken,
+				CsrfToken:         "",
+				RefreshToken:      a.RefreshToken,
+				ClientID:          a.ClientID,
+				ClientSecret:      a.ClientSecret,
+				Region:            a.Region,
+				ExpiresAt:         a.ExpiresAt * 1000,
+				AuthMethod:        authMethod,
+				Provider:          provider,
+				ProfileArn:        a.ProfileArn,
+				ProfileRegionHint: a.ProfileRegionHint,
+				StartURL:          a.StartUrl,
 			},
 			Subscription: ExportSubscription{
 				Type:  subType,

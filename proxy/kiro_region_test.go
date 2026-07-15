@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"kiro-go/config"
+	"strings"
 	"testing"
 )
 
@@ -86,6 +87,39 @@ func TestKiroProfileRegionCandidatesNoRegion(t *testing.T) {
 func TestKiroProfileRegionCandidatesIDCUsEastFallback(t *testing.T) {
 	got := kiroProfileRegionCandidates(&config.Account{AuthMethod: "idc", Region: "us-east-1"})
 	assertOrder(t, got, []string{"us-east-1", "eu-central-1"})
+}
+
+func TestKiroProfileRegionCandidatesUsesIDCProfileHint(t *testing.T) {
+	got := kiroProfileRegionCandidates(&config.Account{
+		AuthMethod:        "idc",
+		Region:            "us-east-1",
+		ProfileRegionHint: "eu-west-1",
+	})
+	assertOrder(t, got, []string{"us-east-1", "eu-west-1", "eu-central-1"})
+}
+
+func TestKiroProfileRegionCandidatesKeepsNonDefaultAuthRegionAndHint(t *testing.T) {
+	got := kiroProfileRegionCandidates(&config.Account{
+		AuthMethod:        "idc",
+		Region:            "eu-north-1",
+		ProfileRegionHint: "us-east-1",
+	})
+	assertOrder(t, got, []string{"eu-north-1", "us-east-1"})
+}
+
+func TestNormalizeCodeWhispererProfileArn(t *testing.T) {
+	raw := " arn:aws:codewhisperer:eu-central-1:123456789012:profile/example "
+	arn, region, ok := normalizeCodeWhispererProfileArn(raw)
+	if !ok || arn != strings.TrimSpace(raw) || region != "eu-central-1" {
+		t.Fatalf("unexpected normalized ARN: arn=%q region=%q ok=%v", arn, region, ok)
+	}
+}
+
+func TestNormalizeCodeWhispererProfileArnRejectsWrongResource(t *testing.T) {
+	_, _, ok := normalizeCodeWhispererProfileArn("arn:aws:codewhisperer:us-east-1:123456789012:application/example")
+	if ok {
+		t.Fatal("expected non-profile ARN to be rejected")
+	}
 }
 
 // TestKiroProfileRegionCandidatesSingleRegionAuthMethods checks that idc/social/

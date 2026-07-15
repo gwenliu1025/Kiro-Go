@@ -850,18 +850,21 @@
 
   function formatSubscriptionLabel(type) {
     const s = (type || '').toUpperCase();
+    if (!s || s === 'UNKNOWN') return t('subscription.unknown');
     if (s.includes('POWER')) return t('subscription.power');
     if (s.includes('PRO_PLUS') || s.includes('PROPLUS')) return t('subscription.proPlus');
     if (s.includes('PRO')) return t('subscription.pro');
     if (s.includes('FREE')) return t('subscription.free');
-    return type || t('subscription.free');
+    return type || t('subscription.unknown');
   }
   function getSubBadge(type) {
     const s = (type || '').toUpperCase();
+    if (!s || s === 'UNKNOWN') return '<span class="badge badge-unknown">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
     if (s.includes('POWER')) return '<span class="badge badge-power">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
     if (s.includes('PRO_PLUS') || s.includes('PROPLUS')) return '<span class="badge badge-proplus">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
     if (s.includes('PRO')) return '<span class="badge badge-pro">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
-    return '<span class="badge badge-free">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
+    if (s.includes('FREE')) return '<span class="badge badge-free">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
+    return '<span class="badge badge-unknown">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
   }
   function getTrialBadge(a) {
     if (a.trialStatus === 'ACTIVE' && a.trialUsageLimit > 0) {
@@ -2055,6 +2058,9 @@
   }
   function closeModal() {
     closeDialog('addModal');
+    if (iamSession) {
+      api('/auth/iam-sso/cancel', { method: 'POST', body: JSON.stringify({ sessionId: iamSession }) }).catch(() => {});
+    }
     iamSession = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
@@ -2111,7 +2117,10 @@
     body.innerHTML =
       '<p class="help-block">' + escapeHtml(t('modal.iamDesc')) + '</p>' +
       '<div class="form-group"><label>' + escapeHtml(t('iam.startUrl')) + '</label><input type="text" id="iamStartUrl" placeholder="https://xxx.awsapps.com/start" /></div>' +
-      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="iamRegion" value="us-east-1" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('iam.profileRegion')) + '</label><input type="text" id="iamProfileRegion" placeholder="eu-central-1" /></div>' +
+      '<details class="iam-advanced"><summary>' + escapeHtml(t('iam.advanced')) + '</summary>' +
+      '<div class="form-group mt-3"><label>' + escapeHtml(t('iam.authRegion')) + '</label><input type="text" id="iamAuthRegion" value="us-east-1" /></div>' +
+      '</details>' +
       '<div id="iamStep2" class="hidden">' +
       '<div class="form-group"><label>' + escapeHtml(t('iam.loginUrl')) + '</label>' +
       '<div class="endpoint"><span id="iamAuthUrl" class="font-mono text-xs"></span></div>' +
@@ -2294,7 +2303,9 @@
             clientSecret: c.clientSecret || a.clientSecret,
             region: c.region || a.region,
             authMethod: c.authMethod || a.authMethod,
-            provider: c.provider || a.provider || a.idp
+            provider: c.provider || a.provider || a.idp,
+            profileArn: c.profileArn || a.profileArn || '',
+            profileRegionHint: c.profileRegionHint || a.profileRegionHint || ''
           };
         });
       } else {
@@ -2322,14 +2333,15 @@
       else authMethod = authMethod.toLowerCase() === 'idc' ? 'idc' : 'social';
       let provider = item.provider || '';
       if (!provider && authMethod === 'social') provider = 'Google';
-      if (!provider && authMethod === 'idc') provider = 'BuilderId';
       const payload = {
         refreshToken: item.refreshToken,
         accessToken: item.accessToken || '',
         clientId: item.clientId || '',
         clientSecret: item.clientSecret || '',
         authMethod, provider,
-        region: item.region || 'us-east-1'
+        region: item.region || 'us-east-1',
+        profileArn: item.profileArn || '',
+        profileRegionHint: item.profileRegionHint || ''
       };
       try {
         const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
@@ -2530,14 +2542,23 @@
       });
       const d = await res.json();
       if (d.success) {
+        iamSession = '';
         closeModal(); loadAccounts(); loadStats();
         toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
+        if (d.warning) toastWarning(t('iam.refreshWarning') + ': ' + d.warning, { duration: 7000 });
         autoRefreshNewAccount(d.account?.id);
       } else toastError(t('common.failed') + ': ' + (d.error || ''));
     } else {
+      const profileRegion = $('iamProfileRegion').value.trim();
+      if (!profileRegion) {
+        toastWarning(t('iam.profileRegionRequired'));
+        return;
+      }
       const res = await api('/auth/iam-sso/start', {
         method: 'POST', body: JSON.stringify({
-          startUrl: $('iamStartUrl').value, region: $('iamRegion').value
+          startUrl: $('iamStartUrl').value,
+          profileRegion,
+          authRegion: $('iamAuthRegion').value
         })
       });
       const d = await res.json();
@@ -2556,8 +2577,14 @@
   }
   async function autoRefreshNewAccount(id) {
     if (!id) return;
-    try { await api('/accounts/' + id + '/refresh', { method: 'POST' }); } catch (e) { }
-    loadAccounts();
+    try {
+      const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.success) throw new Error(d.error || ('HTTP ' + res.status));
+    } catch (e) {
+      toastError(t('iam.refreshWarning') + ': ' + (e?.message || String(e)), { duration: 7000 });
+    }
+    await loadAccounts();
   }
 
   // Export modal

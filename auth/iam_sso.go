@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,14 +19,27 @@ import (
 )
 
 type IamSsoSession struct {
-	ClientID     string
-	ClientSecret string
-	CodeVerifier string
-	State        string
-	Region       string
-	StartUrl     string
-	RedirectUri  string
-	ExpiresAt    time.Time
+	ClientID          string
+	ClientSecret      string
+	CodeVerifier      string
+	State             string
+	AuthRegion        string
+	ProfileRegionHint string
+	StartURL          string
+	RedirectURI       string
+	ExpiresAt         time.Time
+	timer             *time.Timer
+}
+
+type IamSsoResult struct {
+	AccessToken       string
+	RefreshToken      string
+	ClientID          string
+	ClientSecret      string
+	AuthRegion        string
+	ProfileRegionHint string
+	StartURL          string
+	ExpiresIn         int
 }
 
 var (
@@ -40,17 +55,68 @@ var scopes = []string{
 	"codewhisperer:taskassist",
 }
 
-// StartIamSsoLogin 发起 IAM SSO 登录
-func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, expiresIn int, err error) {
-	if region == "" {
-		region = "us-east-1"
+var iamOIDCBaseURL = func(region string) string {
+	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
+}
+
+var (
+	awsRegionPattern                = regexp.MustCompile(`^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$`)
+	awsAccessPortalHostPattern      = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+awsapps\.com$`)
+	identityCenterIssuerPathPattern = regexp.MustCompile(`^/ssoins-[A-Za-z0-9-]+/?$`)
+)
+
+func normalizeIamSsoLoginInput(startURL, authRegion, profileRegionHint string) (string, string, string, error) {
+	startURL = strings.TrimSpace(startURL)
+	authRegion = strings.TrimSpace(authRegion)
+	profileRegionHint = strings.TrimSpace(profileRegionHint)
+	if authRegion == "" {
+		authRegion = "us-east-1"
 	}
 
-	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
-	redirectUri := "http://127.0.0.1/oauth/callback"
+	parsedURL, err := url.Parse(startURL)
+	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.Opaque != "" {
+		return "", "", "", fmt.Errorf("startUrl must be a supported HTTPS AWS access portal or IAM Identity Center issuer URL")
+	}
+	if parsedURL.User != nil || parsedURL.Port() != "" || parsedURL.RawQuery != "" || parsedURL.ForceQuery || parsedURL.Fragment != "" {
+		return "", "", "", fmt.Errorf("startUrl must not contain user info, a port, query parameters, or a fragment")
+	}
+	if strings.Contains(parsedURL.EscapedPath(), "%") {
+		return "", "", "", fmt.Errorf("startUrl contains an unsupported encoded path")
+	}
+
+	host := strings.ToLower(parsedURL.Hostname())
+	isAccessPortal := awsAccessPortalHostPattern.MatchString(host) && (parsedURL.Path == "/start" || parsedURL.Path == "/start/")
+	isIssuer := host == "identitycenter.amazonaws.com" && identityCenterIssuerPathPattern.MatchString(parsedURL.Path)
+	if !isAccessPortal && !isIssuer {
+		return "", "", "", fmt.Errorf("startUrl must be an AWS access portal URL ending in awsapps.com/start or an IAM Identity Center issuer URL")
+	}
+	if !awsRegionPattern.MatchString(authRegion) {
+		return "", "", "", fmt.Errorf("authRegion must be a valid AWS Region")
+	}
+	if !awsRegionPattern.MatchString(profileRegionHint) {
+		return "", "", "", fmt.Errorf("profileRegion must be a valid AWS Region")
+	}
+
+	return startURL, authRegion, profileRegionHint, nil
+}
+
+func ValidateIamSsoLoginInput(startURL, authRegion, profileRegionHint string) error {
+	_, _, _, err := normalizeIamSsoLoginInput(startURL, authRegion, profileRegionHint)
+	return err
+}
+
+// StartIamSsoLogin 发起 IAM SSO 登录
+func StartIamSsoLogin(startURL, authRegion, profileRegionHint string) (sessionID, authorizeURL string, expiresIn int, err error) {
+	startURL, authRegion, profileRegionHint, err = normalizeIamSsoLoginInput(startURL, authRegion, profileRegionHint)
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	oidcBase := iamOIDCBaseURL(authRegion)
+	redirectURI := "http://127.0.0.1/oauth/callback"
 
 	// 1. 注册 OIDC 客户端
-	clientID, clientSecret, err := registerOIDCClient(oidcBase, startUrl, redirectUri)
+	clientID, clientSecret, err := registerOIDCClient(oidcBase, startURL, redirectURI)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("注册客户端失败: %w", err)
 	}
@@ -64,96 +130,122 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 	params := url.Values{}
 	params.Set("response_type", "code")
 	params.Set("client_id", clientID)
-	params.Set("redirect_uri", redirectUri)
+	params.Set("redirect_uri", redirectURI)
 	params.Set("scopes", joinScopes())
 	params.Set("state", state)
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
 
-	authorizeUrl = fmt.Sprintf("%s/authorize?%s", oidcBase, params.Encode())
+	authorizeURL = fmt.Sprintf("%s/authorize?%s", oidcBase, params.Encode())
 
 	// 4. 保存会话
 	sessionID = uuid.New().String()
 	session := &IamSsoSession{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		CodeVerifier: codeVerifier,
-		State:        state,
-		Region:       region,
-		StartUrl:     startUrl,
-		RedirectUri:  redirectUri,
-		ExpiresAt:    time.Now().Add(10 * time.Minute),
+		ClientID:          clientID,
+		ClientSecret:      clientSecret,
+		CodeVerifier:      codeVerifier,
+		State:             state,
+		AuthRegion:        authRegion,
+		ProfileRegionHint: profileRegionHint,
+		StartURL:          startURL,
+		RedirectURI:       redirectURI,
+		ExpiresAt:         time.Now().Add(10 * time.Minute),
 	}
 
 	sessionsMu.Lock()
 	sessions[sessionID] = session
 	sessionsMu.Unlock()
 
-	// 清理过期会话
-	go cleanupExpiredSessions()
+	session.timer = time.AfterFunc(10*time.Minute, func() {
+		CancelIamSsoLogin(sessionID)
+	})
 
-	return sessionID, authorizeUrl, 600, nil
+	return sessionID, authorizeURL, 600, nil
 }
 
 // CompleteIamSsoLogin 完成 IAM SSO 登录
-func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshToken, clientID, clientSecret, region string, expiresIn int, err error) {
+func CompleteIamSsoLogin(sessionID, callbackURL string) (*IamSsoResult, error) {
 	sessionsMu.RLock()
 	session, ok := sessions[sessionID]
 	sessionsMu.RUnlock()
 
 	if !ok {
-		return "", "", "", "", "", 0, fmt.Errorf("会话不存在或已过期")
+		return nil, fmt.Errorf("会话不存在或已过期")
 	}
 
 	if time.Now().After(session.ExpiresAt) {
-		sessionsMu.Lock()
-		delete(sessions, sessionID)
-		sessionsMu.Unlock()
-		return "", "", "", "", "", 0, fmt.Errorf("会话已过期")
+		CancelIamSsoLogin(sessionID)
+		return nil, fmt.Errorf("会话已过期")
 	}
 
 	// 解析回调 URL
-	parsedUrl, err := url.Parse(callbackUrl)
+	parsedURL, err := url.Parse(callbackURL)
 	if err != nil {
-		return "", "", "", "", "", 0, fmt.Errorf("无效的回调 URL")
+		return nil, fmt.Errorf("无效的回调 URL")
 	}
 
-	code := parsedUrl.Query().Get("code")
-	state := parsedUrl.Query().Get("state")
-	errorParam := parsedUrl.Query().Get("error")
+	code := parsedURL.Query().Get("code")
+	state := parsedURL.Query().Get("state")
+	errorParam := parsedURL.Query().Get("error")
 
 	if errorParam != "" {
-		return "", "", "", "", "", 0, fmt.Errorf("授权失败: %s", errorParam)
+		return nil, fmt.Errorf("授权失败: %s", errorParam)
 	}
 
 	if state != session.State {
-		return "", "", "", "", "", 0, fmt.Errorf("状态不匹配，可能存在安全风险")
+		return nil, fmt.Errorf("状态不匹配，可能存在安全风险")
 	}
 
 	if code == "" {
-		return "", "", "", "", "", 0, fmt.Errorf("未收到授权码")
+		return nil, fmt.Errorf("未收到授权码")
 	}
 
 	// 用 code 换取 token
-	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", session.Region)
-	accessToken, refreshToken, expiresIn, err = exchangeToken(
+	oidcBase := iamOIDCBaseURL(session.AuthRegion)
+	accessToken, refreshToken, expiresIn, err := exchangeToken(
 		oidcBase,
 		session.ClientID,
 		session.ClientSecret,
 		code,
 		session.CodeVerifier,
-		session.RedirectUri,
+		session.RedirectURI,
 	)
 	if err != nil {
-		return "", "", "", "", "", 0, err
+		return nil, err
 	}
 
-	// 清理会话
-	sessionsMu.Lock()
-	delete(sessions, sessionID)
-	sessionsMu.Unlock()
+	result := &IamSsoResult{
+		AccessToken:       accessToken,
+		RefreshToken:      refreshToken,
+		ClientID:          session.ClientID,
+		ClientSecret:      session.ClientSecret,
+		AuthRegion:        session.AuthRegion,
+		ProfileRegionHint: session.ProfileRegionHint,
+		StartURL:          session.StartURL,
+		ExpiresIn:         expiresIn,
+	}
+	CancelIamSsoLogin(sessionID)
 
-	return accessToken, refreshToken, session.ClientID, session.ClientSecret, session.Region, expiresIn, nil
+	return result, nil
+}
+
+func CancelIamSsoLogin(sessionID string) {
+	sessionsMu.Lock()
+	session, ok := sessions[sessionID]
+	if ok {
+		delete(sessions, sessionID)
+	}
+	sessionsMu.Unlock()
+	if !ok {
+		return
+	}
+	if session.timer != nil {
+		session.timer.Stop()
+	}
+	session.ClientID = ""
+	session.ClientSecret = ""
+	session.CodeVerifier = ""
+	session.State = ""
 }
 
 func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clientSecret string, err error) {
@@ -251,15 +343,4 @@ func joinScopes() string {
 		result += s
 	}
 	return result
-}
-
-func cleanupExpiredSessions() {
-	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-	now := time.Now()
-	for id, s := range sessions {
-		if now.After(s.ExpiresAt) {
-			delete(sessions, id)
-		}
-	}
 }

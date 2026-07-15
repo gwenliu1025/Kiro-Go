@@ -692,6 +692,11 @@ select.custom-select-native {
   color: #ffffff;
   border-color: #737373;
 }
+.badge-unknown {
+  background: #64748b;
+  color: #ffffff;
+  border-color: #64748b;
+}
 .badge-pro {
   background: #7c3aed;
   color: #ffffff;
@@ -711,6 +716,17 @@ select.custom-select-native {
   background: #0d9488;
   color: #ffffff;
   border-color: #0d9488;
+}
+
+.iam-advanced {
+  margin-bottom: 1rem;
+}
+
+.iam-advanced summary {
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-weight: 600;
 }
 
 /* Switches */
