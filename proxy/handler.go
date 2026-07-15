@@ -3168,13 +3168,15 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		AuthMethod   string `json:"authMethod"`
-		Provider     string `json:"provider"`
-		Region       string `json:"region"`
+		AccessToken       string `json:"accessToken"`
+		RefreshToken      string `json:"refreshToken"`
+		ClientID          string `json:"clientId"`
+		ClientSecret      string `json:"clientSecret"`
+		AuthMethod        string `json:"authMethod"`
+		Provider          string `json:"provider"`
+		Region            string `json:"region"`
+		ProfileArn        string `json:"profileArn"`
+		ProfileRegionHint string `json:"profileRegionHint"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3212,6 +3214,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			req.AuthMethod = "social"
 		}
 	}
+	if req.AuthMethod == "idc" && strings.TrimSpace(req.Provider) == "" {
+		req.Provider = "Enterprise"
+	}
 
 	// 用 refreshToken 刷新获取新的 accessToken。导入必须以一次成功的刷新为前提：
 	// 本地缓存里的 accessToken 不携带可信的过期时间，盲猜短 TTL 会让账号在选号时
@@ -3232,25 +3237,35 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	if newRefreshToken != "" {
 		req.RefreshToken = newRefreshToken
 	}
+	profileArn, profileRegion, _ := normalizeCodeWhispererProfileArn(req.ProfileArn)
+	if refreshedArn, refreshedRegion, ok := normalizeCodeWhispererProfileArn(newProfileArn); ok {
+		profileArn = refreshedArn
+		profileRegion = refreshedRegion
+	}
+	profileRegionHint := strings.TrimSpace(req.ProfileRegionHint)
+	if profileRegionHint == "" {
+		profileRegionHint = profileRegion
+	}
 
 	// 获取用户信息
 	email, _, _ := auth.GetUserInfo(accessToken)
 
 	// 创建账号
 	account := config.Account{
-		ID:           auth.GenerateAccountID(),
-		Email:        email,
-		AccessToken:  accessToken,
-		RefreshToken: req.RefreshToken,
-		ClientID:     req.ClientID,
-		ClientSecret: req.ClientSecret,
-		AuthMethod:   req.AuthMethod,
-		Provider:     req.Provider,
-		Region:       req.Region,
-		ExpiresAt:    expiresAt,
-		Enabled:      true,
-		MachineId:    config.GenerateMachineId(),
-		ProfileArn:   newProfileArn,
+		ID:                auth.GenerateAccountID(),
+		Email:             email,
+		AccessToken:       accessToken,
+		RefreshToken:      req.RefreshToken,
+		ClientID:          req.ClientID,
+		ClientSecret:      req.ClientSecret,
+		AuthMethod:        req.AuthMethod,
+		Provider:          req.Provider,
+		Region:            req.Region,
+		ExpiresAt:         expiresAt,
+		Enabled:           true,
+		MachineId:         config.GenerateMachineId(),
+		ProfileArn:        profileArn,
+		ProfileRegionHint: profileRegionHint,
 	}
 
 	if err := config.AddAccount(account); err != nil {

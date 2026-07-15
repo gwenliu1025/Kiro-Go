@@ -2294,7 +2294,9 @@
             clientSecret: c.clientSecret || a.clientSecret,
             region: c.region || a.region,
             authMethod: c.authMethod || a.authMethod,
-            provider: c.provider || a.provider || a.idp
+            provider: c.provider || a.provider || a.idp,
+            profileArn: c.profileArn || a.profileArn || '',
+            profileRegionHint: c.profileRegionHint || a.profileRegionHint || ''
           };
         });
       } else {
@@ -2322,14 +2324,15 @@
       else authMethod = authMethod.toLowerCase() === 'idc' ? 'idc' : 'social';
       let provider = item.provider || '';
       if (!provider && authMethod === 'social') provider = 'Google';
-      if (!provider && authMethod === 'idc') provider = 'BuilderId';
       const payload = {
         refreshToken: item.refreshToken,
         accessToken: item.accessToken || '',
         clientId: item.clientId || '',
         clientSecret: item.clientSecret || '',
         authMethod, provider,
-        region: item.region || 'us-east-1'
+        region: item.region || 'us-east-1',
+        profileArn: item.profileArn || '',
+        profileRegionHint: item.profileRegionHint || ''
       };
       try {
         const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });

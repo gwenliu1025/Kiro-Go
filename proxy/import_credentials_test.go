@@ -135,5 +135,70 @@ func TestApiImportCredentialsUsesUpstreamExpiresAt(t *testing.T) {
 	}
 }
 
+func TestApiImportCredentialsKeepsImportedProfileArnWhenRefreshOmitsIt(t *testing.T) {
+	got := runSuccessfulCredentialImport(t,
+		`{"accessToken":"at-new","refreshToken":"rt-new","expiresIn":3600}`,
+		`{"refreshToken":"rt-good","clientId":"c","clientSecret":"s","authMethod":"idc","region":"us-east-1","profileRegionHint":"eu-central-1","profileArn":"arn:aws:codewhisperer:eu-central-1:123456789012:profile/imported"}`,
+	)
+	if got.ProfileArn != "arn:aws:codewhisperer:eu-central-1:123456789012:profile/imported" {
+		t.Fatalf("imported profile ARN was not preserved: %+v", got)
+	}
+	if got.ProfileRegionHint != "eu-central-1" || got.Provider != "Enterprise" {
+		t.Fatalf("unexpected imported routing identity: %+v", got)
+	}
+}
+
+func TestApiImportCredentialsPrefersRefreshedProfileArn(t *testing.T) {
+	got := runSuccessfulCredentialImport(t,
+		`{"accessToken":"at-new","refreshToken":"rt-new","expiresIn":3600,"profileArn":"arn:aws:codewhisperer:us-east-1:123456789012:profile/refreshed"}`,
+		`{"refreshToken":"rt-good","clientId":"c","clientSecret":"s","authMethod":"idc","region":"us-east-1","profileRegionHint":"eu-central-1","profileArn":"arn:aws:codewhisperer:eu-central-1:123456789012:profile/imported"}`,
+	)
+	if got.ProfileArn != "arn:aws:codewhisperer:us-east-1:123456789012:profile/refreshed" {
+		t.Fatalf("refreshed profile ARN did not win: %+v", got)
+	}
+}
+
+func TestApiImportCredentialsDefaultsMissingIDCProviderToEnterprise(t *testing.T) {
+	got := runSuccessfulCredentialImport(t,
+		`{"accessToken":"at-new","refreshToken":"rt-new","expiresIn":3600}`,
+		`{"refreshToken":"rt-good","clientId":"c","clientSecret":"s","authMethod":"idc","region":"us-east-1"}`,
+	)
+	if got.Provider != "Enterprise" {
+		t.Fatalf("provider = %q, want Enterprise", got.Provider)
+	}
+}
+
+func runSuccessfulCredentialImport(t *testing.T, refreshResponse, requestBody string) config.Account {
+	t.Helper()
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	defer installCleanAuthClient(t)()
+
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(refreshResponse))
+	}))
+	defer fake.Close()
+
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(string) string { return fake.URL })
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+	h := &Handler{pool: accountpool.GetPool()}
+	req := httptest.NewRequest(http.MethodPost, "/auth/credentials", strings.NewReader(requestBody))
+	rec := httptest.NewRecorder()
+	h.apiImportCredentials(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected successful import, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 {
+		t.Fatalf("expected one imported account, got %d", len(accounts))
+	}
+	return accounts[0]
+}
+
 // authOidcURL captures the current oidc URL builder so the test can restore it.
 func authOidcURL() func(string) string { return auth.GetOIDCTokenURLForTest() }
