@@ -449,6 +449,86 @@ func TestClaudeTruncatedPayloadStreamMatchesNonStreamWithoutCommit(t *testing.T)
 	}
 }
 
+func TestClaudeTruncatedPayloadMissingFinalUsageDoesNotAllocateCache(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream bool
+	}{
+		{name: "同步"},
+		{name: "流式", stream: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := setupClaudeContractHandler(t, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+					"content": "只有上下文占比，没有最终 usage",
+				}))
+				_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+					"contextUsagePercentage": 50.0,
+				}))
+			}))
+			defer upstream.Close()
+			defer swapKiroEndpointsForTest(t, upstream)()
+
+			oversized := strings.Repeat("超大上下文", maxPayloadBytes/len("超大上下文")+4096)
+			recorder := performClaudeContractRequest(t, handler, tc.stream, oversized)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("截断回退失败：status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var usage ClaudeUsage
+			if tc.stream {
+				usage, _ = decodeClaudeFinalSSEUsage(t, recorder.Body.String())
+			} else {
+				usage, _ = decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
+			}
+			if usage.CacheReadInputTokens != 0 || usage.CacheCreationInputTokens != 0 {
+				t.Fatalf("缺少最终 usage 的截断请求不得生成缓存：%+v", usage)
+			}
+			if handler.promptCache.taskCount() != 0 {
+				t.Fatalf("缺少最终 usage 的截断请求不得提交 Tracker")
+			}
+		})
+	}
+}
+
+func TestClaudeTruncatedPayloadInvalidFinalUsageDoesNotAllocateCache(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream bool
+	}{
+		{name: "同步"},
+		{name: "流式", stream: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := setupClaudeContractHandler(t, 1)
+			upstream := newClaudeUsageUpstream(t, "非法终态", -1)
+			defer upstream.Close()
+			defer swapKiroEndpointsForTest(t, upstream)()
+
+			oversized := strings.Repeat("超大上下文", maxPayloadBytes/len("超大上下文")+4096)
+			recorder := performClaudeContractRequest(t, handler, tc.stream, oversized)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("非法终态回退失败：status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var usage ClaudeUsage
+			if tc.stream {
+				usage, _ = decodeClaudeFinalSSEUsage(t, recorder.Body.String())
+			} else {
+				usage, _ = decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
+			}
+			if usage.CacheReadInputTokens != 0 || usage.CacheCreationInputTokens != 0 {
+				t.Fatalf("非法最终 usage 的截断请求不得生成缓存：%+v", usage)
+			}
+			if handler.promptCache.taskCount() != 0 {
+				t.Fatalf("非法最终 usage 的截断请求不得提交 Tracker")
+			}
+		})
+	}
+}
+
 func TestClaudeNonStreamEncodeFailureDoesNotCommitCacheState(t *testing.T) {
 	handler := setupClaudeContractHandler(t, 1)
 	upstream := newClaudeUsageUpstream(t, "编码失败", 10_000)

@@ -1,8 +1,11 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"math"
+	"os"
 	"testing"
 )
 
@@ -26,9 +29,8 @@ func TestClaudeUsageTargetsAlwaysReadAndSupportBothClasses(t *testing.T) {
 }
 
 func TestClaudeUsageRequestClassIsStableAndSeventyFivePercentCreate(t *testing.T) {
-	var taskKey, requestFingerprint [32]byte
-	taskKey[0] = 7
-	requestFingerprint[0] = 11
+	taskKey := deterministicV4Digest(1, 7)
+	requestFingerprint := deterministicV4Digest(2, 11)
 	want := claudeUsageRequestClassFor(taskKey, requestFingerprint)
 	for i := 0; i < 100; i++ {
 		if got := claudeUsageRequestClassFor(taskKey, requestFingerprint); got != want {
@@ -38,8 +40,7 @@ func TestClaudeUsageRequestClassIsStableAndSeventyFivePercentCreate(t *testing.T
 
 	var createCount int
 	for i := 0; i < 10_000; i++ {
-		requestFingerprint[0] = byte(i)
-		requestFingerprint[1] = byte(i >> 8)
+		requestFingerprint = deterministicV4Digest(3, i)
 		if claudeUsageRequestClassFor(taskKey, requestFingerprint) == claudeUsageReadCreate {
 			createCount++
 		}
@@ -472,6 +473,63 @@ func TestAllocateOversizeClaudeUsageRejectsInvalidBudget(t *testing.T) {
 	}
 }
 
+func TestAllocateOversizeClaudeUsageCoversBoundariesAndScaleTrend(t *testing.T) {
+	rawInputs := []int{100_000, 100_001, 120_000, 180_000, 250_000, 400_000, 680_000, 779_460, 1_000_000}
+	const samplesPerSize = 256
+	averageRead := make(map[int]float64, len(rawInputs))
+	averageCreation := make(map[int]float64, len(rawInputs))
+
+	for _, rawInput := range rawInputs {
+		var readTotal, creationTotal int64
+		for sample := 0; sample < samplesPerSize; sample++ {
+			taskKey := deterministicV4Digest(10, sample)
+			fingerprint := deterministicV4Digest(20, sample)
+			usage, ok := allocateOversizeClaudeUsage(rawInput, 10, taskKey, fingerprint)
+			if !ok {
+				t.Fatalf("超大边界样本分配失败：raw=%d sample=%d", rawInput, sample)
+			}
+			if usage.CacheReadInputTokens < 20_000 || usage.CacheReadInputTokens > 300_000 {
+				t.Fatalf("超大读取越界：raw=%d usage=%+v", rawInput, usage)
+			}
+			if usage.CacheCreationInputTokens <= 0 || usage.CacheCreationInputTokens > 350_000 {
+				t.Fatalf("超大创建越界：raw=%d usage=%+v", rawInput, usage)
+			}
+			reserve := maxInt(1_000, int(math.Ceil(0.01*float64(rawInput))))
+			if usage.InputTokens < reserve {
+				t.Fatalf("超大普通输入保留不足：raw=%d reserve=%d usage=%+v", rawInput, reserve, usage)
+			}
+			if usage.CacheCreation.Ephemeral5mInputTokens != 0 ||
+				usage.CacheCreation.Ephemeral1hInputTokens != usage.CacheCreationInputTokens {
+				t.Fatalf("超大请求必须只使用 1 小时创建：raw=%d usage=%+v", rawInput, usage)
+			}
+			assertClaudeUsageConserved(t, rawInput, usage)
+			readTotal += int64(usage.CacheReadInputTokens)
+			creationTotal += int64(usage.CacheCreationInputTokens)
+		}
+		averageRead[rawInput] = float64(readTotal) / samplesPerSize
+		averageCreation[rawInput] = float64(creationTotal) / samplesPerSize
+	}
+
+	if averageRead[680_000] <= averageRead[120_000] {
+		t.Fatalf("超大读取均值应随规模增加：小=%.2f 大=%.2f", averageRead[120_000], averageRead[680_000])
+	}
+	if averageCreation[680_000] <= averageCreation[120_000] {
+		t.Fatalf("超大创建均值应随规模增加：小=%.2f 大=%.2f", averageCreation[120_000], averageCreation[680_000])
+	}
+	t.Logf(
+		"超大规模趋势：120K读取=%.2f 创建=%.2f；680K读取=%.2f 创建=%.2f",
+		averageRead[120_000],
+		averageCreation[120_000],
+		averageRead[680_000],
+		averageCreation[680_000],
+	)
+
+	var key [32]byte
+	if usage, ok := allocateOversizeClaudeUsage(99_999, 10, key, key); ok {
+		t.Fatalf("低于超大阈值的请求应回退：%+v", usage)
+	}
+}
+
 func TestAllocateClaudeUsageChecksAtMostSixtyFourCandidates(t *testing.T) {
 	_, _, checked := allocateClaudeUsageWithCandidateCount(
 		100_000,
@@ -544,15 +602,13 @@ func TestClaudeUsageJSONAlwaysIncludesCompleteCacheFields(t *testing.T) {
 }
 
 func TestClaudeUsageV4DistributionGates(t *testing.T) {
-	var createCount int
+	snapshot := loadClaudeUsageV4ReplaySnapshot(t)
+	var classifiedCreateCount, actualCreateCount int
 	var readTotal, displayTotal int64
 	for i := 0; i < 10_000; i++ {
-		var taskKey, fingerprint [32]byte
-		taskKey[0] = byte(i)
-		taskKey[1] = byte(i >> 8)
-		fingerprint[0] = byte(i * 31)
-		fingerprint[1] = byte(i >> 4)
-		rawInput := representativeV4RawInput(i, 10_000)
+		taskKey := deterministicV4Digest(100, i)
+		fingerprint := deterministicV4Digest(101, i)
+		rawInput := snapshot.Normal[i%len(snapshot.Normal)]
 		features := buildClaudeUsageFeatures(
 			promptCacheSnapshot{TaskKey: taskKey, RequestFingerprint: fingerprint},
 			claudeRequestAnalysis{},
@@ -560,11 +616,14 @@ func TestClaudeUsageV4DistributionGates(t *testing.T) {
 		)
 		target := claudeUsageTargetsForFeatures(features)
 		if features.CreateCache {
-			createCount++
+			classifiedCreateCount++
 		}
 		usage, ok := allocateClaudeUsage(rawInput, 10, ttlForTask(taskKey), target)
 		if !ok {
 			t.Fatalf("分布样本分配失败：index=%d raw=%d", i, rawInput)
+		}
+		if usage.CacheCreationInputTokens > 0 {
+			actualCreateCount++
 		}
 		readTotal += int64(usage.CacheReadInputTokens)
 		displayTotal += int64(
@@ -573,25 +632,32 @@ func TestClaudeUsageV4DistributionGates(t *testing.T) {
 				usage.CacheCreationInputTokens,
 		)
 	}
-	createRate := float64(createCount) / 10_000
+	createRate := float64(actualCreateCount) / 10_000
 	if createRate < 0.70 || createRate > 0.80 {
-		t.Fatalf("创建请求率越界：%.6f", createRate)
+		t.Fatalf(
+			"最终实际创建请求率越界：actual=%.6f classified=%.6f",
+			createRate,
+			float64(classifiedCreateCount)/10_000,
+		)
 	}
 	hitRate := float64(readTotal) / float64(displayTotal)
 	if hitRate < 0.923 || hitRate > 0.932 {
 		t.Fatalf("正常命中率越界：%.6f", hitRate)
 	}
+	t.Logf(
+		"V4正常分布：实际创建率=%.6f 分类创建率=%.6f 命中率=%.6f",
+		createRate,
+		float64(classifiedCreateCount)/10_000,
+		hitRate,
+	)
 }
 
 func TestClaudeUsageV4FullPanelCentersNearEightyFivePercent(t *testing.T) {
+	snapshot := loadClaudeUsageV4ReplaySnapshot(t)
 	var readTotal, displayTotal int64
-	for i := 0; i < 432; i++ {
-		var taskKey, fingerprint [32]byte
-		taskKey[0] = byte(i)
-		taskKey[1] = byte(i >> 8)
-		fingerprint[0] = byte(i * 31)
-		fingerprint[1] = byte(i >> 4)
-		rawInput := representativeV4RawInput(i, 432)
+	for i, rawInput := range snapshot.Normal {
+		taskKey := deterministicV4Digest(200, i)
+		fingerprint := deterministicV4Digest(201, i)
 		features := buildClaudeUsageFeatures(
 			promptCacheSnapshot{TaskKey: taskKey, RequestFingerprint: fingerprint},
 			claudeRequestAnalysis{},
@@ -610,14 +676,9 @@ func TestClaudeUsageV4FullPanelCentersNearEightyFivePercent(t *testing.T) {
 		displayTotal += int64(usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens)
 	}
 
-	for i := 0; i < 68; i++ {
-		index := 10_000 + i
-		var taskKey, fingerprint [32]byte
-		taskKey[0] = byte(index)
-		taskKey[1] = byte(index >> 8)
-		fingerprint[0] = byte(index * 31)
-		fingerprint[1] = byte(index >> 4)
-		rawInput := representativeV4OversizeInput(i, 68)
+	for i, rawInput := range snapshot.Oversize {
+		taskKey := deterministicV4Digest(300, i)
+		fingerprint := deterministicV4Digest(301, i)
 		usage, ok := allocateOversizeClaudeUsage(rawInput, 10, taskKey, fingerprint)
 		if !ok {
 			t.Fatalf("超大面板样本分配失败：index=%d raw=%d", i, rawInput)
@@ -630,59 +691,46 @@ func TestClaudeUsageV4FullPanelCentersNearEightyFivePercent(t *testing.T) {
 	if hitRate < 0.845 || hitRate > 0.855 {
 		t.Fatalf("Sub2API 全量面板命中率应接近 85%%：%.6f", hitRate)
 	}
+	t.Logf(
+		"V4固定500条全量面板：命中率=%.6f 正常=%d 超大=%d",
+		hitRate,
+		len(snapshot.Normal),
+		len(snapshot.Oversize),
+	)
 }
 
-func representativeV4RawInput(index, total int) int {
-	anchors := [...]struct {
-		quantile float64
-		tokens   int
-	}{
-		{0.00, 1_296},
-		{0.25, 6_510},
-		{0.50, 44_970},
-		{0.75, 92_012},
-		{0.90, 138_616},
-		{0.95, 147_761},
-		{1.00, 182_716},
-	}
-	q := float64(index) / float64(total-1)
-	for i := 1; i < len(anchors); i++ {
-		if q > anchors[i].quantile {
-			continue
-		}
-		left := anchors[i-1]
-		right := anchors[i]
-		fraction := (q - left.quantile) / (right.quantile - left.quantile)
-		return int(math.Round(float64(left.tokens) + float64(right.tokens-left.tokens)*fraction))
-	}
-	return anchors[len(anchors)-1].tokens
+type claudeUsageV4ReplaySnapshot struct {
+	Snapshot string `json:"snapshot"`
+	Normal   []int  `json:"normal"`
+	Oversize []int  `json:"oversize"`
 }
 
-func representativeV4OversizeInput(index, total int) int {
-	anchors := [...]struct {
-		quantile float64
-		tokens   int
-	}{
-		{0.00, 101_523},
-		{0.10, 194_774},
-		{0.25, 197_081},
-		{0.50, 204_040},
-		{0.75, 678_809},
-		{0.90, 681_633},
-		{0.95, 682_555},
-		{1.00, 779_460},
+func loadClaudeUsageV4ReplaySnapshot(t *testing.T) claudeUsageV4ReplaySnapshot {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/claude_usage_v4_replay.json")
+	if err != nil {
+		t.Fatalf("读取 V4 匿名回放快照失败：%v", err)
 	}
-	q := float64(index) / float64(total-1)
-	for i := 1; i < len(anchors); i++ {
-		if q > anchors[i].quantile {
-			continue
-		}
-		left := anchors[i-1]
-		right := anchors[i]
-		fraction := (q - left.quantile) / (right.quantile - left.quantile)
-		return int(math.Round(float64(left.tokens) + float64(right.tokens-left.tokens)*fraction))
+	var snapshot claudeUsageV4ReplaySnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("解析 V4 匿名回放快照失败：%v", err)
 	}
-	return anchors[len(anchors)-1].tokens
+	if snapshot.Snapshot == "" || len(snapshot.Normal) != 432 || len(snapshot.Oversize) != 68 {
+		t.Fatalf(
+			"V4 匿名回放快照不完整：snapshot=%q normal=%d oversize=%d",
+			snapshot.Snapshot,
+			len(snapshot.Normal),
+			len(snapshot.Oversize),
+		)
+	}
+	return snapshot
+}
+
+func deterministicV4Digest(namespace uint64, index int) [32]byte {
+	var input [16]byte
+	binary.BigEndian.PutUint64(input[:8], namespace)
+	binary.BigEndian.PutUint64(input[8:], uint64(index))
+	return sha256.Sum256(input[:])
 }
 
 func representativeClaudeUsageFeatures(index int) claudeUsageFeatures {

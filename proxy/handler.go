@@ -877,6 +877,12 @@ func prepareOversizeClaudeUsage(
 	return preparedClaudeUsage{Usage: usage}
 }
 
+func validFinalClaudeUsage(inputTokens, outputTokens int) bool {
+	return inputTokens > 0 &&
+		outputTokens >= 0 &&
+		inputTokens <= maxIntValue()/20
+}
+
 func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", 405)
@@ -985,6 +991,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		var inputTokens, outputTokens int
+		var finalInputTokens, finalOutputTokens int
 		var credits float64
 		var realInputTokens int
 		var finalUsageComplete bool
@@ -1292,8 +1299,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				inputTokens = inTok
 				outputTokens = outTok
 			},
-			OnFinalUsage: func(_, _ int) {
-				finalUsageComplete = true
+			OnFinalUsage: func(inTok, outTok int) {
+				if validFinalClaudeUsage(inTok, outTok) {
+					finalInputTokens = inTok
+					finalOutputTokens = outTok
+					finalUsageComplete = true
+				}
 			},
 			OnCredits: func(c float64) {
 				credits = c
@@ -1359,18 +1370,18 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				OutputTokens: outputTokens,
 			},
 		}
-		if finalUsageComplete || realInputTokens > 0 {
-			if payload != nil && payload.WasTruncated {
-				prepared = prepareOversizeClaudeUsage(inputTokens, outputTokens, analysis)
-			} else {
-				prepared = prepareFinalClaudeUsage(
-					inputTokens,
-					outputTokens,
-					analysis,
-					snapshot,
-					time.Now(),
-				)
+		if payload != nil && payload.WasTruncated {
+			if finalUsageComplete {
+				prepared = prepareOversizeClaudeUsage(finalInputTokens, finalOutputTokens, analysis)
 			}
+		} else if finalUsageComplete || realInputTokens > 0 {
+			prepared = prepareFinalClaudeUsage(
+				inputTokens,
+				outputTokens,
+				analysis,
+				snapshot,
+				time.Now(),
+			)
 		}
 
 		ensureMessageStart()
@@ -1582,6 +1593,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		var thinkingContent string
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
+		var finalInputTokens, finalOutputTokens int
 		var credits float64
 		var realInputTokens int
 		var finalUsageComplete bool
@@ -1601,8 +1613,12 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				inputTokens = inTok
 				outputTokens = outTok
 			},
-			OnFinalUsage: func(_, _ int) {
-				finalUsageComplete = true
+			OnFinalUsage: func(inTok, outTok int) {
+				if validFinalClaudeUsage(inTok, outTok) {
+					finalInputTokens = inTok
+					finalOutputTokens = outTok
+					finalUsageComplete = true
+				}
 			},
 			OnCredits: func(c float64) {
 				credits = c
@@ -1669,18 +1685,18 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				OutputTokens: outputTokens,
 			},
 		}
-		if finalUsageComplete || realInputTokens > 0 {
-			if payload != nil && payload.WasTruncated {
-				prepared = prepareOversizeClaudeUsage(inputTokens, outputTokens, analysis)
-			} else {
-				prepared = prepareFinalClaudeUsage(
-					inputTokens,
-					outputTokens,
-					analysis,
-					snapshot,
-					time.Now(),
-				)
+		if payload != nil && payload.WasTruncated {
+			if finalUsageComplete {
+				prepared = prepareOversizeClaudeUsage(finalInputTokens, finalOutputTokens, analysis)
 			}
+		} else if finalUsageComplete || realInputTokens > 0 {
+			prepared = prepareFinalClaudeUsage(
+				inputTokens,
+				outputTokens,
+				analysis,
+				snapshot,
+				time.Now(),
+			)
 		}
 
 		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
