@@ -178,6 +178,70 @@ func smoothstep01(value float64) float64 {
 	return t * t * (3 - 2*t)
 }
 
+func oversizeClaudePressure(rawInputTokens int) float64 {
+	return smoothstep(180_000, 680_000, float64(rawInputTokens))
+}
+
+func roundToMultiple(value float64, multiple int) int {
+	if multiple <= 1 {
+		return int(math.Round(value))
+	}
+	return int(math.Round(value/float64(multiple))) * multiple
+}
+
+func allocateOversizeClaudeUsage(
+	rawInputTokens int,
+	rawOutputTokens int,
+	taskKey [32]byte,
+	requestFingerprint [32]byte,
+) (ClaudeUsage, bool) {
+	if rawInputTokens < 100_000 || rawOutputTokens < 0 || rawInputTokens > maxIntValue()/20 {
+		return ClaudeUsage{}, false
+	}
+
+	pressure := oversizeClaudePressure(rawInputTokens)
+	readTarget := roundToMultiple(clampFloat(
+		20_000+
+			280_000*pressure+
+			30_000*stableClaudeUsageJitterFor(taskKey, requestFingerprint, "oversize-read"),
+		20_000,
+		300_000,
+	), 10)
+	creationTarget := int(math.Round(clampFloat(
+		100_000+
+			250_000*pressure+
+			25_000*stableClaudeUsageJitterFor(taskKey, requestFingerprint, "oversize-creation"),
+		100_000,
+		350_000,
+	)))
+	reserve := maxInt(1_000, int(math.Ceil(0.01*float64(rawInputTokens))))
+	maxCreation := (20*rawInputTokens - 2*readTarget - 20*reserve) / 40
+	if maxCreation <= 0 {
+		return ClaudeUsage{}, false
+	}
+	creationTokens := minInt(creationTarget, maxCreation)
+	remaining := 20*rawInputTokens - 2*readTarget - 40*creationTokens
+	if remaining < 0 || remaining%20 != 0 {
+		return ClaudeUsage{}, false
+	}
+	inputTokens := remaining / 20
+	if inputTokens < reserve {
+		return ClaudeUsage{}, false
+	}
+
+	usage := ClaudeUsage{
+		InputTokens:              inputTokens,
+		OutputTokens:             rawOutputTokens,
+		CacheCreationInputTokens: creationTokens,
+		CacheReadInputTokens:     readTarget,
+	}
+	usage.CacheCreation.Ephemeral1hInputTokens = creationTokens
+	if !claudeUsageCostConserved(rawInputTokens, usage) {
+		return ClaudeUsage{}, false
+	}
+	return usage, true
+}
+
 func allocateClaudeUsage(
 	rawInputTokens int,
 	rawOutputTokens int,

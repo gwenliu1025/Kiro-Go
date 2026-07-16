@@ -422,6 +422,56 @@ func TestAllocateClaudeUsageRejectsOverflow(t *testing.T) {
 	}
 }
 
+func TestAllocateOversizeClaudeUsageIsStableAndConserved(t *testing.T) {
+	var taskKey, fingerprint [32]byte
+	taskKey[0] = 17
+	fingerprint[0] = 29
+	first, ok := allocateOversizeClaudeUsage(779_460, 321, taskKey, fingerprint)
+	if !ok {
+		t.Fatalf("超大请求分配失败")
+	}
+	second, ok := allocateOversizeClaudeUsage(779_460, 321, taskKey, fingerprint)
+	if !ok || second != first {
+		t.Fatalf("超大请求分配必须稳定：first=%+v second=%+v", first, second)
+	}
+	if first.CacheReadInputTokens < 20_000 || first.CacheReadInputTokens > 300_000 {
+		t.Fatalf("超大读取越界：%+v", first)
+	}
+	if first.CacheCreationInputTokens <= 0 || first.CacheCreationInputTokens > 350_000 {
+		t.Fatalf("超大创建越界：%+v", first)
+	}
+	if first.CacheCreation.Ephemeral5mInputTokens != 0 ||
+		first.CacheCreation.Ephemeral1hInputTokens != first.CacheCreationInputTokens {
+		t.Fatalf("超大请求必须只创建 1h 缓存：%+v", first.CacheCreation)
+	}
+	assertClaudeUsageConserved(t, 779_460, first)
+}
+
+func TestAllocateOversizeClaudeUsagePrioritizesFeasibilityForSmallBudget(t *testing.T) {
+	var taskKey, fingerprint [32]byte
+	usage, ok := allocateOversizeClaudeUsage(101_523, 10, taskKey, fingerprint)
+	if !ok {
+		t.Fatalf("最小固定样本应存在可行分配")
+	}
+	reserve := maxInt(1_000, int(math.Ceil(0.01*101_523)))
+	if usage.InputTokens < reserve {
+		t.Fatalf("普通输入保留不足：usage=%+v reserve=%d", usage, reserve)
+	}
+	if usage.CacheCreationInputTokens >= 100_000 {
+		t.Fatalf("费用不足时创建目标必须下调：%+v", usage)
+	}
+	assertClaudeUsageConserved(t, 101_523, usage)
+}
+
+func TestAllocateOversizeClaudeUsageRejectsInvalidBudget(t *testing.T) {
+	var key [32]byte
+	for _, rawInput := range []int{-1, 0, 1, 10_000, math.MaxInt} {
+		if usage, ok := allocateOversizeClaudeUsage(rawInput, 10, key, key); ok {
+			t.Fatalf("输入 %d 应回退：%+v", rawInput, usage)
+		}
+	}
+}
+
 func TestAllocateClaudeUsageChecksAtMostSixtyFourCandidates(t *testing.T) {
 	_, _, checked := allocateClaudeUsageWithCandidateCount(
 		100_000,
