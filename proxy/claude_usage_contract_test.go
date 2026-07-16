@@ -391,9 +391,9 @@ func TestClaudeClientDisconnectCommitsOnlyAfterFinalUpstreamUsage(t *testing.T) 
 	}
 }
 
-func TestClaudeTruncatedPayloadFallsBackWithoutCommit(t *testing.T) {
+func TestClaudeTruncatedPayloadReturnsControlledCacheUsageWithoutCommit(t *testing.T) {
 	handler := setupClaudeContractHandler(t, 1)
-	upstream := newClaudeUsageUpstream(t, "截断响应", 10_000)
+	upstream := newClaudeUsageUpstream(t, "截断响应", 500_000)
 	defer upstream.Close()
 	defer swapKiroEndpointsForTest(t, upstream)()
 
@@ -405,13 +405,47 @@ func TestClaudeTruncatedPayloadFallsBackWithoutCommit(t *testing.T) {
 
 	usage, rawUsage := decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
 	assertCompleteClaudeUsageFields(t, rawUsage)
-	if usage.InputTokens != 10_000 ||
-		usage.CacheReadInputTokens != 0 ||
-		usage.CacheCreationInputTokens != 0 {
-		t.Fatalf("截断请求必须回退原始 usage：%+v", usage)
+	if usage.CacheReadInputTokens < 20_000 || usage.CacheReadInputTokens > 300_000 {
+		t.Fatalf("截断读取越界：%+v", usage)
 	}
+	if usage.CacheCreationInputTokens <= 0 || usage.CacheCreationInputTokens > 350_000 {
+		t.Fatalf("截断创建越界：%+v", usage)
+	}
+	if usage.CacheCreation.Ephemeral1hInputTokens != usage.CacheCreationInputTokens ||
+		usage.CacheCreation.Ephemeral5mInputTokens != 0 {
+		t.Fatalf("截断请求必须只创建 1h 缓存：%+v", usage)
+	}
+	assertClaudeUsageConserved(t, 500_000, usage)
 	if handler.promptCache.taskCount() != 0 {
 		t.Fatalf("截断请求不得提交未实际发送的前缀")
+	}
+}
+
+func TestClaudeTruncatedPayloadStreamMatchesNonStreamWithoutCommit(t *testing.T) {
+	nonStreamHandler := setupClaudeContractHandler(t, 1)
+	streamHandler := &Handler{
+		pool:        nonStreamHandler.pool,
+		promptCache: newPromptCacheTracker(time.Hour),
+	}
+	upstream := newClaudeUsageUpstream(t, "截断一致响应", 500_000)
+	defer upstream.Close()
+	defer swapKiroEndpointsForTest(t, upstream)()
+
+	oversized := strings.Repeat("超大上下文", maxPayloadBytes/len("超大上下文")+4096)
+	nonStream := performClaudeContractRequest(t, nonStreamHandler, false, oversized)
+	want, _ := decodeClaudeNonStreamUsage(t, nonStream.Body.Bytes())
+
+	stream := performClaudeContractRequest(t, streamHandler, true, oversized)
+	if stream.Code != http.StatusOK {
+		t.Fatalf("流式截断请求失败：status=%d body=%s", stream.Code, stream.Body.String())
+	}
+	got, rawFinal := decodeClaudeFinalSSEUsage(t, stream.Body.String())
+	assertCompleteClaudeUsageFields(t, rawFinal)
+	if got != want {
+		t.Fatalf("截断同步与流式 usage 不一致：sync=%+v stream=%+v", want, got)
+	}
+	if nonStreamHandler.promptCache.taskCount() != 0 || streamHandler.promptCache.taskCount() != 0 {
+		t.Fatalf("截断请求不得提交 Tracker 状态")
 	}
 }
 

@@ -856,6 +856,27 @@ func prepareFinalClaudeUsage(
 	}
 }
 
+func prepareOversizeClaudeUsage(
+	rawInputTokens int,
+	rawOutputTokens int,
+	analysis claudeRequestAnalysis,
+) preparedClaudeUsage {
+	rawUsage := ClaudeUsage{
+		InputTokens:  maxInt(rawInputTokens, 0),
+		OutputTokens: maxInt(rawOutputTokens, 0),
+	}
+	usage, ok := allocateOversizeClaudeUsage(
+		rawInputTokens,
+		rawOutputTokens,
+		analysis.TaskKey,
+		analysis.RequestFingerprint,
+	)
+	if !ok {
+		return preparedClaudeUsage{Usage: rawUsage}
+	}
+	return preparedClaudeUsage{Usage: usage}
+}
+
 func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", 405)
@@ -1338,15 +1359,18 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				OutputTokens: outputTokens,
 			},
 		}
-		if (finalUsageComplete || realInputTokens > 0) &&
-			(payload == nil || !payload.WasTruncated) {
-			prepared = prepareFinalClaudeUsage(
-				inputTokens,
-				outputTokens,
-				analysis,
-				snapshot,
-				time.Now(),
-			)
+		if finalUsageComplete || realInputTokens > 0 {
+			if payload != nil && payload.WasTruncated {
+				prepared = prepareOversizeClaudeUsage(inputTokens, outputTokens, analysis)
+			} else {
+				prepared = prepareFinalClaudeUsage(
+					inputTokens,
+					outputTokens,
+					analysis,
+					snapshot,
+					time.Now(),
+				)
+			}
 		}
 
 		ensureMessageStart()
@@ -1645,15 +1669,18 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				OutputTokens: outputTokens,
 			},
 		}
-		if (finalUsageComplete || realInputTokens > 0) &&
-			(payload == nil || !payload.WasTruncated) {
-			prepared = prepareFinalClaudeUsage(
-				inputTokens,
-				outputTokens,
-				analysis,
-				snapshot,
-				time.Now(),
-			)
+		if finalUsageComplete || realInputTokens > 0 {
+			if payload != nil && payload.WasTruncated {
+				prepared = prepareOversizeClaudeUsage(inputTokens, outputTokens, analysis)
+			} else {
+				prepared = prepareFinalClaudeUsage(
+					inputTokens,
+					outputTokens,
+					analysis,
+					snapshot,
+					time.Now(),
+				)
+			}
 		}
 
 		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
