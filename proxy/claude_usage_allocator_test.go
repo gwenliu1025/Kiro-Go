@@ -543,6 +543,148 @@ func TestClaudeUsageJSONAlwaysIncludesCompleteCacheFields(t *testing.T) {
 	}
 }
 
+func TestClaudeUsageV4DistributionGates(t *testing.T) {
+	var createCount int
+	var readTotal, displayTotal int64
+	for i := 0; i < 10_000; i++ {
+		var taskKey, fingerprint [32]byte
+		taskKey[0] = byte(i)
+		taskKey[1] = byte(i >> 8)
+		fingerprint[0] = byte(i * 31)
+		fingerprint[1] = byte(i >> 4)
+		rawInput := representativeV4RawInput(i, 10_000)
+		features := buildClaudeUsageFeatures(
+			promptCacheSnapshot{TaskKey: taskKey, RequestFingerprint: fingerprint},
+			claudeRequestAnalysis{},
+			rawInput,
+		)
+		target := claudeUsageTargetsForFeatures(features)
+		if features.CreateCache {
+			createCount++
+		}
+		usage, ok := allocateClaudeUsage(rawInput, 10, ttlForTask(taskKey), target)
+		if !ok {
+			t.Fatalf("分布样本分配失败：index=%d raw=%d", i, rawInput)
+		}
+		readTotal += int64(usage.CacheReadInputTokens)
+		displayTotal += int64(
+			usage.InputTokens +
+				usage.CacheReadInputTokens +
+				usage.CacheCreationInputTokens,
+		)
+	}
+	createRate := float64(createCount) / 10_000
+	if createRate < 0.70 || createRate > 0.80 {
+		t.Fatalf("创建请求率越界：%.6f", createRate)
+	}
+	hitRate := float64(readTotal) / float64(displayTotal)
+	if hitRate < 0.923 || hitRate > 0.932 {
+		t.Fatalf("正常命中率越界：%.6f", hitRate)
+	}
+}
+
+func TestClaudeUsageV4FullPanelCentersNearEightyFivePercent(t *testing.T) {
+	var readTotal, displayTotal int64
+	for i := 0; i < 432; i++ {
+		var taskKey, fingerprint [32]byte
+		taskKey[0] = byte(i)
+		taskKey[1] = byte(i >> 8)
+		fingerprint[0] = byte(i * 31)
+		fingerprint[1] = byte(i >> 4)
+		rawInput := representativeV4RawInput(i, 432)
+		features := buildClaudeUsageFeatures(
+			promptCacheSnapshot{TaskKey: taskKey, RequestFingerprint: fingerprint},
+			claudeRequestAnalysis{},
+			rawInput,
+		)
+		usage, ok := allocateClaudeUsage(
+			rawInput,
+			10,
+			ttlForTask(taskKey),
+			claudeUsageTargetsForFeatures(features),
+		)
+		if !ok {
+			t.Fatalf("正常面板样本分配失败：index=%d raw=%d", i, rawInput)
+		}
+		readTotal += int64(usage.CacheReadInputTokens)
+		displayTotal += int64(usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens)
+	}
+
+	for i := 0; i < 68; i++ {
+		index := 10_000 + i
+		var taskKey, fingerprint [32]byte
+		taskKey[0] = byte(index)
+		taskKey[1] = byte(index >> 8)
+		fingerprint[0] = byte(index * 31)
+		fingerprint[1] = byte(index >> 4)
+		rawInput := representativeV4OversizeInput(i, 68)
+		usage, ok := allocateOversizeClaudeUsage(rawInput, 10, taskKey, fingerprint)
+		if !ok {
+			t.Fatalf("超大面板样本分配失败：index=%d raw=%d", i, rawInput)
+		}
+		readTotal += int64(usage.CacheReadInputTokens)
+		displayTotal += int64(usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens)
+	}
+
+	hitRate := float64(readTotal) / float64(displayTotal)
+	if hitRate < 0.845 || hitRate > 0.855 {
+		t.Fatalf("Sub2API 全量面板命中率应接近 85%%：%.6f", hitRate)
+	}
+}
+
+func representativeV4RawInput(index, total int) int {
+	anchors := [...]struct {
+		quantile float64
+		tokens   int
+	}{
+		{0.00, 1_296},
+		{0.25, 6_510},
+		{0.50, 44_970},
+		{0.75, 92_012},
+		{0.90, 138_616},
+		{0.95, 147_761},
+		{1.00, 182_716},
+	}
+	q := float64(index) / float64(total-1)
+	for i := 1; i < len(anchors); i++ {
+		if q > anchors[i].quantile {
+			continue
+		}
+		left := anchors[i-1]
+		right := anchors[i]
+		fraction := (q - left.quantile) / (right.quantile - left.quantile)
+		return int(math.Round(float64(left.tokens) + float64(right.tokens-left.tokens)*fraction))
+	}
+	return anchors[len(anchors)-1].tokens
+}
+
+func representativeV4OversizeInput(index, total int) int {
+	anchors := [...]struct {
+		quantile float64
+		tokens   int
+	}{
+		{0.00, 101_523},
+		{0.10, 194_774},
+		{0.25, 197_081},
+		{0.50, 204_040},
+		{0.75, 678_809},
+		{0.90, 681_633},
+		{0.95, 682_555},
+		{1.00, 779_460},
+	}
+	q := float64(index) / float64(total-1)
+	for i := 1; i < len(anchors); i++ {
+		if q > anchors[i].quantile {
+			continue
+		}
+		left := anchors[i-1]
+		right := anchors[i]
+		fraction := (q - left.quantile) / (right.quantile - left.quantile)
+		return int(math.Round(float64(left.tokens) + float64(right.tokens-left.tokens)*fraction))
+	}
+	return anchors[len(anchors)-1].tokens
+}
+
 func representativeClaudeUsageFeatures(index int) claudeUsageFeatures {
 	return claudeUsageFeatures{
 		Phase:                promptCachePhaseContinue,

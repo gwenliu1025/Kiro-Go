@@ -433,6 +433,12 @@ func TestPromptCacheTrackerTTLDistributionIsStableTwentyEighty(t *testing.T) {
 	}
 }
 
+func TestPromptCacheAlgorithmVersionIsV4(t *testing.T) {
+	if promptCacheAlgorithmVersion != "native-high-cache-v4" {
+		t.Fatalf("算法版本错误：%s", promptCacheAlgorithmVersion)
+	}
+}
+
 func TestPromptCacheTrackerConcurrentSnapshotAndCommit(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	now := time.Unix(1_700_000_000, 0)
