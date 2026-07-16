@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestClaudeUsageTargetsAlwaysReadAndHalfCreate(t *testing.T) {
+func TestClaudeUsageTargetsAlwaysReadAndSupportBothClasses(t *testing.T) {
 	var readOnly, readCreate int
 	const samples = 10_000
 	for i := 0; i < samples; i++ {
@@ -25,7 +25,7 @@ func TestClaudeUsageTargetsAlwaysReadAndHalfCreate(t *testing.T) {
 	}
 }
 
-func TestClaudeUsageRequestClassIsStableAndBalanced(t *testing.T) {
+func TestClaudeUsageRequestClassIsStableAndSeventyFivePercentCreate(t *testing.T) {
 	var taskKey, requestFingerprint [32]byte
 	taskKey[0] = 7
 	requestFingerprint[0] = 11
@@ -44,8 +44,8 @@ func TestClaudeUsageRequestClassIsStableAndBalanced(t *testing.T) {
 			createCount++
 		}
 	}
-	if createCount < 4_500 || createCount > 5_500 {
-		t.Fatalf("创建类别分布偏离 50%%：%d/10000", createCount)
+	if createCount < 7_000 || createCount > 8_000 {
+		t.Fatalf("创建类别应位于 70%%–80%%：%d/10000", createCount)
 	}
 }
 
@@ -84,12 +84,13 @@ func TestClaudeUsageTargetsFirstRoundsAlwaysRead(t *testing.T) {
 
 func TestClaudeUsageTargetsSupportsReadOnlyRequests(t *testing.T) {
 	target := claudeUsageTargetsForFeatures(claudeUsageFeatures{
-		Phase:        promptCachePhaseFirst,
-		GrowthRatio:  1,
-		SizeFactor:   0.7,
-		ToolRatio:    0.1,
-		StableJitter: -0.9,
-		CreateCache:  false,
+		Phase:                promptCachePhaseFirst,
+		GrowthRatio:          1,
+		SizeFactor:           0.7,
+		ToolRatio:            0.1,
+		StableHitJitter:      -0.9,
+		StableCreationJitter: -0.5,
+		CreateCache:          false,
 	})
 
 	if target.ReadShare <= 0 || target.CreateShare != 0 {
@@ -99,39 +100,16 @@ func TestClaudeUsageTargetsSupportsReadOnlyRequests(t *testing.T) {
 	assertTargetShares(t, target)
 }
 
-func TestClaudeUsageTargetsGrowthRaisesCreationShare(t *testing.T) {
-	base := claudeUsageFeatures{
-		Phase:        promptCachePhaseContinue,
-		ReuseRatio:   0.8,
-		AgeRatio:     0.2,
-		RoundFactor:  0.3,
-		SizeFactor:   0.7,
-		ToolRatio:    0.1,
-		StableJitter: 0.1,
-		CreateCache:  true,
-	}
-	lowGrowth := base
-	lowGrowth.GrowthRatio = 0.005
-	highGrowth := base
-	highGrowth.GrowthRatio = 0.12
-
-	low := claudeUsageTargetsForFeatures(lowGrowth)
-	high := claudeUsageTargetsForFeatures(highGrowth)
-
-	if high.CreateShare <= low.CreateShare {
-		t.Fatalf("增长比例提高时创建占比不应下降：低=%.6f 高=%.6f", low.CreateShare, high.CreateShare)
-	}
-}
-
 func TestClaudeUsageTargetsReuseDoesNotBreakHitRate(t *testing.T) {
 	base := claudeUsageFeatures{
-		Phase:        promptCachePhaseContinue,
-		GrowthRatio:  0.04,
-		AgeRatio:     0.2,
-		RoundFactor:  0.3,
-		SizeFactor:   0.7,
-		ToolRatio:    0.1,
-		StableJitter: 0.1,
+		Phase:                promptCachePhaseContinue,
+		GrowthRatio:          0.04,
+		AgeRatio:             0.2,
+		RoundFactor:          0.3,
+		SizeFactor:           0.7,
+		ToolRatio:            0.1,
+		StableHitJitter:      0.1,
+		StableCreationJitter: 0.1,
 	}
 	lowReuse := base
 	lowReuse.ReuseRatio = 0.4
@@ -147,16 +125,19 @@ func TestClaudeUsageTargetsReuseDoesNotBreakHitRate(t *testing.T) {
 
 func TestClaudeUsageTargetsJitterAffectsResult(t *testing.T) {
 	baseFeatures := claudeUsageFeatures{
-		Phase:        promptCachePhaseContinue,
-		ReuseRatio:   0.75,
-		GrowthRatio:  0.03,
-		SizeFactor:   0.7,
-		StableJitter: 0,
+		Phase:                promptCachePhaseContinue,
+		ReuseRatio:           0.75,
+		GrowthRatio:          0.03,
+		SizeFactor:           0.875,
+		StableHitJitter:      -0.5,
+		StableCreationJitter: 0,
+		CreateCache:          true,
 	}
 	base := claudeUsageTargetsForFeatures(baseFeatures)
 
 	jitter := baseFeatures
-	jitter.StableJitter = 0.8
+	jitter.StableHitJitter = 0.5
+	jitter.StableCreationJitter = 0.8
 	got := claudeUsageTargetsForFeatures(jitter)
 	if got == base {
 		t.Fatalf("稳定微扰变化后目标比例不应完全相同")
@@ -172,7 +153,7 @@ func TestClaudeUsageTargetsStayWithinHitRateBounds(t *testing.T) {
 	}
 }
 
-func TestClaudeUsageTargetsKeepCreationSmall(t *testing.T) {
+func TestClaudeUsageTargetsCreationFractionStaysWithinBounds(t *testing.T) {
 	const samples = 5_000
 	for i := 0; i < samples; i++ {
 		features := representativeClaudeUsageFeatures(i)
@@ -180,29 +161,54 @@ func TestClaudeUsageTargetsKeepCreationSmall(t *testing.T) {
 		features.CreateCache = true
 		target := claudeUsageTargetsForFeatures(features)
 		assertTargetHitRate(t, target.ReadShare)
-		if target.CreateShare <= 0 || target.CreateShare > 0.05 {
-			t.Fatalf("创建比例应为少量新增上下文：%+v", target)
+		nonReadShare := 1 - target.ReadShare
+		creationFraction := target.CreateShare / nonReadShare
+		if creationFraction < 0.26 || creationFraction > 0.75 {
+			t.Fatalf("创建份额应位于 26%%–75%%：%.6f", creationFraction)
 		}
 	}
 }
 
-func TestClaudeUsageTargetsLargerInputReadsMore(t *testing.T) {
+func TestClaudeUsageTargetsLargeInputsReadLessAndCreateMore(t *testing.T) {
 	base := claudeUsageFeatures{
-		Phase:        promptCachePhaseContinue,
-		ReuseRatio:   0.6,
-		GrowthRatio:  0.2,
-		CreateCache:  true,
-		StableJitter: 0.1,
+		Phase:                promptCachePhaseContinue,
+		ReuseRatio:           0.6,
+		GrowthRatio:          0.2,
+		CreateCache:          true,
+		StableHitJitter:      0,
+		StableCreationJitter: 0,
 	}
 	small := base
-	small.SizeFactor = 0.2
+	small.SizeFactor = 0.65
 	large := base
-	large.SizeFactor = 0.9
+	large.SizeFactor = 0.875
 
 	smallTarget := claudeUsageTargetsForFeatures(small)
 	largeTarget := claudeUsageTargetsForFeatures(large)
-	if largeTarget.ReadShare <= smallTarget.ReadShare {
-		t.Fatalf("大输入的读取命中率应更高：小=%.6f 大=%.6f", smallTarget.ReadShare, largeTarget.ReadShare)
+	if largeTarget.ReadShare >= smallTarget.ReadShare {
+		t.Fatalf("大输入读取比例应下降：小=%.6f 大=%.6f", smallTarget.ReadShare, largeTarget.ReadShare)
+	}
+	smallFraction := smallTarget.CreateShare / (1 - smallTarget.ReadShare)
+	largeFraction := largeTarget.CreateShare / (1 - largeTarget.ReadShare)
+	if largeFraction <= smallFraction {
+		t.Fatalf("大输入创建份额应提高：小=%.6f 大=%.6f", smallFraction, largeFraction)
+	}
+}
+
+func TestClaudeUsageTargetAnchors(t *testing.T) {
+	small := claudeUsageTargetsForFeatures(claudeUsageFeatures{
+		SizeFactor:      0.60,
+		StableHitJitter: 0,
+	})
+	large := claudeUsageTargetsForFeatures(claudeUsageFeatures{
+		SizeFactor:      0.875,
+		StableHitJitter: 0,
+	})
+	if math.Abs(small.ReadShare-0.95) > 1e-9 {
+		t.Fatalf("小请求锚点错误：%.6f", small.ReadShare)
+	}
+	if math.Abs(large.ReadShare-0.90) > 1e-9 {
+		t.Fatalf("大请求锚点错误：%.6f", large.ReadShare)
 	}
 }
 
@@ -224,17 +230,45 @@ func TestAllocateClaudeUsageConservesOneHourCost(t *testing.T) {
 	assertClaudeUsageConserved(t, 10_000, usage)
 }
 
+func TestAllocateClaudeUsageSupportsExpandedInputShare(t *testing.T) {
+	target := claudeUsageTargets{
+		InputShare:  0.15,
+		ReadShare:   0.85,
+		CreateShare: 0,
+	}
+	usage, ok := allocateClaudeUsage(100_000, 100, promptCacheTTL1h, target)
+	if !ok {
+		t.Fatalf("85%% 只读目标应存在合法整数解")
+	}
+	assertClaudeUsageConserved(t, 100_000, usage)
+	assertUsageHitRate(t, usage)
+}
+
+func TestAllocateClaudeUsageSupportsLargeCreationFraction(t *testing.T) {
+	target := claudeUsageTargets{
+		InputShare:  0.025,
+		ReadShare:   0.90,
+		CreateShare: 0.075,
+	}
+	usage, ok := allocateClaudeUsage(200_000, 100, promptCacheTTL1h, target)
+	if !ok {
+		t.Fatalf("大请求 75%% 非读取创建份额应存在合法整数解")
+	}
+	assertClaudeUsageConserved(t, 200_000, usage)
+}
+
 func TestAllocateClaudeUsageKeepsActualHitRateBounded(t *testing.T) {
 	for _, ttl := range []promptCacheTTL{promptCacheTTL5m, promptCacheTTL1h} {
 		for rawInput := 100; rawInput <= 100_000; rawInput += 997 {
 			target := claudeUsageTargetsForFeatures(claudeUsageFeatures{
-				Phase:        promptCachePhaseContinue,
-				ReuseRatio:   0.95,
-				GrowthRatio:  0.0001,
-				RoundFactor:  1,
-				SizeFactor:   math.Log2(1+float64(rawInput)) / 20,
-				StableJitter: -1,
-				CreateCache:  true,
+				Phase:                promptCachePhaseContinue,
+				ReuseRatio:           0.95,
+				GrowthRatio:          0.0001,
+				RoundFactor:          1,
+				SizeFactor:           math.Log2(1+float64(rawInput)) / 20,
+				StableHitJitter:      -1,
+				StableCreationJitter: -1,
+				CreateCache:          true,
 			})
 			usage, ok := allocateClaudeUsage(rawInput, 10, ttl, target)
 			if !ok {
@@ -461,28 +495,30 @@ func TestClaudeUsageJSONAlwaysIncludesCompleteCacheFields(t *testing.T) {
 
 func representativeClaudeUsageFeatures(index int) claudeUsageFeatures {
 	return claudeUsageFeatures{
-		Phase:        promptCachePhaseContinue,
-		ReuseRatio:   float64((index*37)%901) / 1000,
-		GrowthRatio:  0.0001 + float64((index*53)%500)/10_000,
-		AgeRatio:     float64((index*71)%1000) / 1000,
-		RoundFactor:  float64((index*89)%1000) / 1000,
-		SizeFactor:   float64((index*97)%1000) / 1000,
-		ToolRatio:    float64((index*113)%400) / 1000,
-		StableJitter: float64((index*131)%2001)/1000 - 1,
+		Phase:                promptCachePhaseContinue,
+		ReuseRatio:           float64((index*37)%901) / 1000,
+		GrowthRatio:          0.0001 + float64((index*53)%500)/10_000,
+		AgeRatio:             float64((index*71)%1000) / 1000,
+		RoundFactor:          float64((index*89)%1000) / 1000,
+		SizeFactor:           float64((index*97)%1000) / 1000,
+		ToolRatio:            float64((index*113)%400) / 1000,
+		StableHitJitter:      float64((index*131)%2001)/1000 - 1,
+		StableCreationJitter: float64((index*149)%2001)/1000 - 1,
 	}
 }
 
 func continuationTarget() claudeUsageTargets {
 	return claudeUsageTargetsForFeatures(claudeUsageFeatures{
-		Phase:        promptCachePhaseContinue,
-		ReuseRatio:   0.8,
-		GrowthRatio:  0.03,
-		AgeRatio:     0.2,
-		RoundFactor:  0.4,
-		SizeFactor:   0.8,
-		ToolRatio:    0.1,
-		StableJitter: 0.1,
-		CreateCache:  true,
+		Phase:                promptCachePhaseContinue,
+		ReuseRatio:           0.8,
+		GrowthRatio:          0.03,
+		AgeRatio:             0.2,
+		RoundFactor:          0.4,
+		SizeFactor:           0.8,
+		ToolRatio:            0.1,
+		StableHitJitter:      0.1,
+		StableCreationJitter: 0.1,
+		CreateCache:          true,
 	})
 }
 
@@ -492,7 +528,7 @@ func assertTargetShares(t *testing.T, target claudeUsageTargets) {
 	if math.Abs(sum-1) > 1e-12 {
 		t.Fatalf("目标比例之和应为 1，得到 %.12f", sum)
 	}
-	if target.InputShare < 0.01 || target.InputShare > 0.05 {
+	if target.InputShare < 0.01 || target.InputShare > 0.15 {
 		t.Fatalf("普通输入目标越界：%.6f", target.InputShare)
 	}
 	if target.ReadShare < minClaudeReadHitRate || target.ReadShare > maxClaudeReadHitRate {
@@ -527,7 +563,7 @@ func assertUsageRatios(t *testing.T, usage ClaudeUsage, expectRead bool) {
 	if readShare < minClaudeReadHitRate || readShare > maxClaudeReadHitRate {
 		t.Fatalf("真实读取命中率越界：%.6f", readShare)
 	}
-	if inputShare < 0.01 || inputShare > 0.05 {
+	if inputShare < 0.01 || inputShare > 0.15 {
 		t.Fatalf("普通输入比例越界：%.6f", inputShare)
 	}
 	if expectRead {

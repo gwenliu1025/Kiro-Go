@@ -102,9 +102,10 @@ func TestClaudeUsageRetryAcrossAccountsIsStable(t *testing.T) {
 		t.Fatalf("账号重试后仍失败：status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	usage, _ := decodeClaudeNonStreamUsage(t, recorder.Body.Bytes())
-	if usage.CacheCreationInputTokens <= 0 {
-		t.Fatalf("重试成功后应生成高缓存 usage：%+v", usage)
+	if usage.CacheReadInputTokens <= 0 {
+		t.Fatalf("重试成功后应生成缓存读取 usage：%+v", usage)
 	}
+	assertUsageHitRate(t, usage)
 	if attempts.Load() != 2 {
 		t.Fatalf("应跨两个账号重试，实际请求次数=%d", attempts.Load())
 	}
